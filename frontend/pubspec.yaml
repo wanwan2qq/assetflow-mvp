@@ -1,0 +1,74 @@
+name: assetflow_frontend
+description: AssetFlow AI-native family asset allocation advisor
+
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: ">=3.10.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # Generated API Client
+  assetflow_api:
+    path: lib/generated/api
+  
+  # State Management
+  flutter_riverpod: ^2.4.9
+  riverpod_annotation: ^2.3.3
+  
+  # Routing
+  go_router: ^12.1.3
+  
+  # Charts
+  fl_chart: ^0.65.0
+  
+  # HTTP & WebSocket
+  dio: ^5.4.0
+  web_socket_channel: ^2.4.0
+  
+  # JSON & Code Generation
+  json_annotation: ^4.8.1
+  freezed_annotation: ^2.4.1
+  
+  # UI & Utils
+  cupertino_icons: ^1.0.2
+  flutter_markdown: ^0.6.18
+  intl: ^0.18.1
+  device_info_plus: ^9.1.1
+  shared_preferences: ^2.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  
+  # Code Generation
+  build_runner: ^2.4.7
+  riverpod_generator: ^2.3.9
+  json_serializable: ^6.7.1
+  freezed: ^2.4.6
+  
+  # OpenAPI Code Generation (temporarily disabled)
+  # openapi_generator_annotations: ^4.0.3
+  
+  # Testing
+  faker: ^2.1.0
+  mockito: ^5.4.4
+  
+  # Linting
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
+  
+  assets:
+    - assets/images/
+    - assets/icons/
+
+flutter_gen:
+  output: lib/gen/
+  line_length: 80

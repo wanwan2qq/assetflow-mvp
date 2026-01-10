@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Frontend Token Access Test</title>
+</head>
+<body>
+    <h1>Frontend Token Access Test</h1>
+    <div id="results"></div>
+    
+    <script>
+        // Test if we can access the Flutter app's token
+        function testTokenAccess() {
+            const results = document.getElementById('results');
+            
+            // Try to access Flutter app state
+            if (window.flutter_app_state) {
+                results.innerHTML += '<p>✅ Flutter app state found</p>';
+                results.innerHTML += '<pre>' + JSON.stringify(window.flutter_app_state, null, 2) + '</pre>';
+            } else {
+                results.innerHTML += '<p>❌ Flutter app state not found</p>';
+            }
+            
+            // Try to access localStorage
+            const keys = Object.keys(localStorage);
+            results.innerHTML += '<h3>LocalStorage Keys:</h3>';
+            keys.forEach(key => {
+                results.innerHTML += '<p>' + key + ': ' + localStorage.getItem(key) + '</p>';
+            });
+            
+            // Try to access sessionStorage
+            const sessionKeys = Object.keys(sessionStorage);
+            results.innerHTML += '<h3>SessionStorage Keys:</h3>';
+            sessionKeys.forEach(key => {
+                results.innerHTML += '<p>' + key + ': ' + sessionStorage.getItem(key) + '</p>';
+            });
+        }
+        
+        // Run test after page loads
+        setTimeout(testTokenAccess, 1000);
+        
+        // Also run test every 5 seconds
+        setInterval(testTokenAccess, 5000);
+    </script>
+</body>
+</html>
