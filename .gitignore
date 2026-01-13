@@ -96,6 +96,9 @@ coverage/
 test-results/
 coverage.xml
 
+# Hypothesis testing cache
+.hypothesis/
+
 # Temporary files
 *.tmp
 *.temp

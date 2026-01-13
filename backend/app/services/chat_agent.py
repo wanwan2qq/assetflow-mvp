@@ -102,16 +102,16 @@ class ChatAgent:
     def _create_agent(self):
         """Create LangChain agent with tools"""
 
-        # Define the system prompt
-        system_prompt = """你是AssetFlow的AI资产配置顾问，专门为中国家庭提供基于标准普尔四象限模型的专业资产配置建议。
+        # Define the system prompt with Senior Private Banker persona
+        system_prompt = """你不仅仅是AI，你是AssetFlow的首席资产配置专家（Chief Asset Allocation Expert）。你的目标是不仅提供数据，更提供"财务安全感"。
 
-你的主要职责：
-1. 通过自然对话引导用户完成资产盘点
-2. 使用搜索工具获取房产估值
-3. 基于标准普尔四象限模型提供配置建议
-4. 生成结构化的UI组件标签
+**核心人设 (Persona)：**
+* **专业而温暖**：像一位相识多年的老友，专业但不说教。请适度使用emoji (如 🤝, 💡, 📈) 来活跃气氛，但不要滥用。
+* **结果导向**：不要为了收集信息而收集信息。如果用户直接问"我有50万怎么投"，请直接给出基于假设的初步建议，然后再温和地补充询问细节。
+* **拒绝机械**：严禁使用"Step 1: xxx"这种机器人的说话方式。将流程内化于对话中。
+* **共情能力**：当用户表达焦虑（如房贷压力、股市亏损）时，先给予情感上的回应和安抚。
 
-标准普尔四象限模型详解：
+**标准普尔四象限逻辑 (The Logic)：**
 **要花的钱（10%）**：日常开销和应急资金，建议6个月生活费，存放在高流动性账户
 **保命的钱（20%）**：保险保障，包括重疾险、意外险、寿险等，保障家庭风险
 **生钱的钱（30%）**：高风险高收益投资，如股票、股票基金、房地产投资等
@@ -124,41 +124,31 @@ class ChatAgent:
 - 保守型用户：生钱的钱减至15%，保本升值的钱增至45%
 - 激进型用户：生钱的钱增至45%，保本升值的钱减至32%
 
-对话流程控制：
-- 初始阶段：主动询问用户的房产情况（位置、面积、购买时间等）
-- 房产收集阶段：使用property_search工具获取估值，确认房产价值
-- 资产收集阶段：系统性询问其他资产类别（现金、投资、负债、保险）
-- 用户画像阶段：了解年龄、家庭结构、风险偏好、月支出等
-- 分析阶段：基于四象限模型进行资产配置分析
+**交互策略 (Interaction Strategy)：**
+1. **房产估值**：当用户提到房产时，先赞赏其资产积累，再自然地调取 `property_search` 工具。
+   * *Bad*: "系统检测到房产，正在查询估值..."
+   * *Good*: "哇，在那个地段拥有房产非常棒！💡 让我帮您看看现在的市场参考价，稍等..."
 
-具体引导策略：
-1. 当用户首次对话时，友好地询问："您好！我是您的AI资产配置顾问，将基于标准普尔四象限模型为您提供专业建议。为了开始分析，我想先了解一下您的房产情况。请问您目前有房产吗？在哪个城市？"
+2. **资产盘点**：不要像查户口一样连续追问。每次只问一个核心问题，并解释"为什么我要问这个问题"。
+   * *Example*: "为了帮您平衡风险，我还想了解一下您手头的流动资金（现金/活期）大概能覆盖几个月的开销？"
 
-2. 当获得房产信息后，使用property_search工具查询市场价格，然后说："根据市场数据，我估算您的房产价值约为X万元。这个估值是否合理？"
+3. **共情回应**：当用户表达财务压力时，先安抚情绪。
+   * *Example*: "我理解高房贷确实会带来压力 🤝，这种担心很正常。让我们一起看看如何优化您的资产配置来缓解这种压力..."
 
-3. 当房产信息确认后，继续询问："除了房产，我还需要了解您的其他资产情况。请问您目前有多少现金储蓄？"
+4. **动态建议**：根据用户具体问题直接给建议，不要总是要求完整信息。
+   * *Example*: 用户问"50万怎么投" → 直接给出基于假设的配置建议，然后说"当然，如果您能告诉我更多情况，我可以给出更精准的建议"
 
-4. 依次询问投资、负债、保险等信息，每次只问一个类别。
-
-5. 当资产信息收集完整后，询问用户画像："为了给您更精准的四象限配置建议，请问您的年龄段和家庭情况？"
-
-6. 信息收集完整后，进行分析："基于您提供的信息，我来为您分析一下标准普尔四象限资产配置情况..."
-
-UI组件生成规则：
+**UI组件触发规则 (Critical)：**
 - 当确认房产估值时，生成：<WIDGET:VALUATION_CARD data="{{price: 价格, area: 面积, location: '位置'}}">
 - 当发现风险问题时，生成：<WIDGET:ACTION_CARD data="{{type: '类型', title: '标题', description: '描述', priority: '优先级'}}">
 - 当进行资产分析时，生成：<WIDGET:PORTFOLIO_CHART data="{{assets: [资产数组]}}">
 
-重要原则：
-- 保持对话自然、专业且友好，避免机械化问答
-- 逐步引导，每次只询问一个主题，避免信息过载
-- 对房产估值应用0.95的保守系数
-- 严格按照标准普尔四象限模型进行分析和建议
-- 根据用户画像动态调整四象限配置比例
-- 在适当时机自动插入UI组件标签
-- 当用户提供不完整信息时，礼貌地要求补充
+**安全原则：**
+- 严禁编造任何财务数据或市场信息
+- 所有房产估值必须通过property_search工具获取
+- 严格遵循标准普尔四象限模型逻辑
 - 始终以用户的财务安全和长期利益为出发点
-- 明确说明每个象限的作用和建议配置比例
+- 当信息不足时，基于合理假设给出建议，但要明确说明假设条件
 """
 
         # Create agent using the new API
@@ -310,51 +300,70 @@ UI组件生成规则：
         
         message_lower = message.lower()
         
-        # Greeting responses
+        # Check for emotional keywords that need empathy
+        stress_keywords = ["压力", "焦虑", "担心", "困难", "亏损", "负债", "房贷"]
+        has_stress = any(keyword in message_lower for keyword in stress_keywords)
+        
+        # Greeting responses with warm persona
         if any(greeting in message_lower for greeting in ["你好", "hello", "hi", "您好"]):
             if context.current_stage == "initial":
-                return "您好！我是您的AI资产配置顾问，将基于标准普尔四象限模型为您提供专业建议。为了开始分析，我想先了解一下您的房产情况。请问您目前有房产吗？在哪个城市？"
+                return "您好！🤝 我是AssetFlow的首席资产配置专家，很高兴为您服务！我不只是提供数据分析，更希望能给您带来财务安全感。\n\n让我们从了解您的资产情况开始吧 💡 - 请问您目前有房产吗？不用担心信息不全，我们可以边聊边完善。"
             else:
-                return "您好！很高兴继续为您服务。请告诉我您还想了解什么？"
+                return "您好！很高兴继续为您服务 🤝 有什么新的财务问题想要探讨吗？"
         
-        # Property-related responses
+        # Property-related responses with appreciation
         if any(word in message_lower for word in ["房", "房产", "房子", "小区", "楼盘"]):
-            if context.current_stage == "initial":
-                # Try to extract property info and provide valuation
+            if has_stress and "房贷" in message_lower:
+                return "我理解高房贷确实会带来压力 🤝，这种担心很正常。让我们一起看看如何优化您的资产配置来缓解这种压力...\n\n首先，拥有房产本身就是很好的资产积累！💡 能告诉我房产的具体位置和大概面积吗？这样我可以帮您评估现在的市场价值。"
+            elif context.current_stage == "initial":
                 if "北京" in message or "上海" in message or "深圳" in message or "广州" in message:
-                    return "好的，我了解到您在一线城市有房产。能告诉我具体的小区名称和房屋面积吗？这样我可以为您提供更准确的估值。"
+                    return "哇，在一线城市拥有房产非常棒！💡 这是很好的资产基础。让我帮您看看现在的市场参考价 📈\n\n能告诉我具体的小区名称和房屋面积吗？稍等，我来查询一下最新的市场数据..."
                 else:
-                    return "感谢您提供房产信息。为了给您准确的估值，请告诉我：1）房产所在的具体城市和小区名称；2）房屋面积（平方米）；3）大概的购买时间。"
+                    return "很好！房产是重要的资产组成部分 🏠 为了给您准确的估值和配置建议，我需要了解：\n\n1）房产所在的具体城市和小区名称\n2）房屋面积（平方米）\n3）大概的购买时间\n\n这些信息能帮我更好地评估您的资产结构。"
             else:
-                return "关于您的房产配置，根据标准普尔四象限模型，房产通常属于'生钱的钱'象限。我建议您的房产占总资产比例不要超过60%，以保持资产配置的平衡。"
+                return "关于您的房产配置 🏠，根据标准普尔四象限模型，房产通常属于'生钱的钱'象限。我建议房产占总资产比例控制在合理范围内，这样能更好地平衡风险和收益。"
         
-        # Asset-related responses
+        # Direct investment questions - provide immediate value
+        if any(word in message_lower for word in ["50万", "100万", "怎么投", "如何投资"]):
+            amount_match = None
+            if "50万" in message_lower:
+                amount_match = "50万"
+            elif "100万" in message_lower:
+                amount_match = "100万"
+            
+            if amount_match:
+                return f"很好的问题！💡 对于{amount_match}的投资，我先给您一个基于标准普尔四象限的初步建议：\n\n🔹 **要花的钱（10%）**：{int(amount_match[:-1]) * 0.1}万 - 应急资金\n🔹 **保命的钱（20%）**：{int(amount_match[:-1]) * 0.2}万 - 保险保障\n🔹 **生钱的钱（30%）**：{int(amount_match[:-1]) * 0.3}万 - 股票基金等\n🔹 **保本升值（40%）**：{int(amount_match[:-1]) * 0.4}万 - 稳健理财\n\n当然，如果您能告诉我更多情况（比如年龄、风险偏好、现有资产），我可以给出更精准的个性化建议 🤝"
+        
+        # Asset-related responses with guidance
         if any(word in message_lower for word in ["资产", "投资", "理财", "存款", "股票", "基金"]):
-            return "很好！除了房产，了解您的其他资产情况对制定配置方案很重要。请告诉我您目前的：1）现金储蓄；2）投资产品（股票、基金等）；3）保险情况；4）其他负债。我会根据标准普尔四象限模型为您分析。"
+            if has_stress:
+                return "我理解投资有时会让人感到压力 🤝 这很正常，让我们一起梳理一下您的资产情况，找到最适合的配置方案。\n\n除了房产，请告诉我您目前的：\n💰 现金储蓄大概有多少？\n📈 投资产品（股票、基金等）情况如何？\n🛡️ 保险配置是否完善？\n\n我会根据标准普尔四象限模型为您分析，帮您找到平衡点。"
+            else:
+                return "很好！💡 全面了解资产情况是制定配置方案的基础。让我们按四象限来梳理：\n\n🔹 **流动资金**：现金储蓄有多少？\n🔹 **投资产品**：股票、基金等情况？\n🔹 **保险保障**：重疾险、意外险是否配置？\n🔹 **负债情况**：房贷或其他负债？\n\n不用一次性全部说完，我们可以一项项来聊 🤝"
         
-        # Analysis requests
+        # Analysis requests with empathy
         if any(word in message_lower for word in ["分析", "建议", "配置", "怎么办", "如何"]):
             if len(context.extracted_assets) >= 1:
-                return "基于您提供的信息，我来为您分析标准普尔四象限资产配置：\n\n**要花的钱（10%）**：日常开销和应急资金\n**保命的钱（20%）**：保险保障\n**生钱的钱（30%）**：高风险高收益投资\n**保本升值的钱（40%）**：稳健投资\n\n根据您的情况，我建议优先完善应急资金储备和保险保障。"
+                return "基于您提供的信息，让我为您分析标准普尔四象限资产配置 📊\n\n**四象限配置逻辑：**\n🔹 **要花的钱（10%）**：应急资金，6个月生活费\n🔹 **保命的钱（20%）**：保险保障，守护家庭\n🔹 **生钱的钱（30%）**：高收益投资，财富增长\n🔹 **保本升值（40%）**：稳健投资，保值增值\n\n根据您的情况，我建议优先完善应急资金储备和保险保障 💡 这样能给您更多安全感。"
             else:
-                return "要为您提供准确的配置建议，我需要先了解您的资产情况。请先告诉我您的房产、现金储蓄、投资和负债情况，然后我会基于标准普尔四象限模型为您制定个性化方案。"
+                return "我很乐意为您提供配置建议！💡 不过为了给出最适合您的方案，我需要先了解您的资产情况。\n\n我们可以从最重要的开始：\n🏠 房产情况（位置、价值）\n💰 现金储蓄\n📈 现有投资\n\n有了这些信息，我就能基于标准普尔四象限模型为您制定个性化方案了 🤝"
         
-        # Numbers or financial amounts
+        # Numbers or financial amounts with encouragement
         if any(char.isdigit() for char in message):
             if "万" in message or "元" in message:
-                return "感谢您提供具体的金额信息。这对我制定精准的配置建议很有帮助。请继续告诉我其他资产类别的情况，这样我就能为您进行全面的四象限分析了。"
+                return "感谢您提供具体的金额信息！💡 这对制定精准的配置建议很有帮助。\n\n让我们继续完善其他资产类别的情况，这样我就能为您进行全面的四象限分析了。您还有其他投资或储蓄想要一起考虑的吗？"
             else:
-                return "我注意到您提到了一些数字。如果这是关于资产金额的，请告诉我具体是哪类资产，金额是多少，这样我能更好地为您分析。"
+                return "我注意到您提到了一些数字 🤔 如果这是关于资产金额的，请告诉我具体是哪类资产，金额是多少，这样我能更好地为您分析配置方案。"
         
-        # Default response based on conversation stage
+        # Default responses based on conversation stage with warm tone
         if context.current_stage == "initial":
-            return "我是您的AI资产配置顾问。为了给您最合适的建议，让我们从了解您的房产情况开始吧。请问您目前有房产吗？"
+            return "我是您的首席资产配置专家 🤝 让我们从了解您的房产情况开始吧！这是很多家庭最重要的资产。请问您目前有房产吗？在哪个城市呢？"
         elif context.current_stage == "property_collection":
-            return "很好，我们已经收集了一些房产信息。现在请告诉我您的其他资产情况，比如现金储蓄、投资产品等。"
+            return "很好，房产信息我们已经有了基础了解 🏠 现在让我们看看其他资产情况。比如您手头的现金储蓄大概有多少？这对应四象限中的'要花的钱'部分。"
         elif context.current_stage == "asset_collection":
-            return "资产信息收集得差不多了。为了给您更精准的建议，请告诉我您的年龄段、家庭情况和风险偏好。"
+            return "资产信息收集得不错！💡 为了给您更精准的四象限配置建议，我还想了解一下您的个人情况：年龄段、家庭结构，以及您对投资风险的接受程度如何？"
         else:
-            return "基于您提供的信息，我建议按照标准普尔四象限模型进行资产配置。您还有什么具体问题想了解吗？"
+            return "基于您提供的信息，我建议按照标准普尔四象限模型进行资产配置 📊 您还有什么具体问题想了解吗？我很乐意为您详细解答 🤝"
 
     def _update_conversation_stage(
         self, context: ChatContext, validation: dict[str, Any]
@@ -451,13 +460,30 @@ UI组件生成规则：
             asset_summary = f"\n[已提取资产: {len(context.extracted_assets)}项]"
             contextual_parts.append(asset_summary)
 
-        # Add user profile summary
+        # Add dynamic tone instructions based on user profile
         if context.user_profile:
             profile_fields = [
                 k for k, v in context.user_profile.items() if v is not None
             ]
             profile_summary = f"\n[用户画像: {', '.join(profile_fields)}]"
             contextual_parts.append(profile_summary)
+            
+            # Dynamic tone hints based on risk profile
+            risk_profile = context.user_profile.get("risk_profile")
+            if risk_profile == "conservative":
+                contextual_parts.append("\n[Tone Hint: Be extra cautious and focus on capital preservation]")
+            elif risk_profile == "aggressive":
+                contextual_parts.append("\n[Tone Hint: Focus on growth opportunities but remind about risks]")
+            
+            # Age-based tone hints
+            age = context.user_profile.get("age")
+            if age and age > 50:
+                contextual_parts.append("\n[Tone Hint: Focus on retirement planning and liquidity]")
+            
+            # Debt-related empathy hints
+            monthly_expenses = context.user_profile.get("monthly_expenses")
+            if monthly_expenses and monthly_expenses > 20000:  # High expenses might indicate stress
+                contextual_parts.append("\n[Tone Hint: Show empathy for financial pressure and focus on practical solutions]")
 
         return "".join(contextual_parts)
 
@@ -485,8 +511,10 @@ UI组件生成规则：
                 analysis_summary = await self._generate_portfolio_analysis(
                     context, user_id
                 )
-                if analysis_summary:
-                    enhanced_response += f"\n\n{analysis_summary}"
+                # REMOVED: Double-response bug fix - Let AI persona control the conversation flow
+                # The analysis_summary text was causing duplicate portfolio summaries
+                # if analysis_summary:
+                #     enhanced_response += f"\n\n{analysis_summary}"
 
                 # Add portfolio chart if appropriate
                 if self.ui_service.should_generate_portfolio_chart(
