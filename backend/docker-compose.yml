@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  # PostgreSQL Database
+  # PostgreSQL Database with pgvector
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg16
     container_name: assetflow-postgres
     environment:
       POSTGRES_USER: assetflow
@@ -51,9 +51,11 @@ services:
       - REDIS_URL=redis://redis:6379
       - ENVIRONMENT=development
       - USE_MOCK_SEARCH=true
+      - HF_HOME=/root/.cache/huggingface
     volumes:
       - .:/app
       - /app/.venv  # Exclude .venv from volume mount
+      - ~/.cache/huggingface:/root/.cache/huggingface
     depends_on:
       postgres:
         condition: service_healthy

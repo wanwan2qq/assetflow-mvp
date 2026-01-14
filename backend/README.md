@@ -12,23 +12,40 @@ AssetFlow 是一个 AI 驱动的家庭资产配置顾问系统的后端服务，
 - **推荐系统**: 基于投资组合健康度的个性化推荐
 - **错误处理**: 优雅的错误处理和自动重试机制
 
+### 🆕 Phase 4: L3 向量记忆 (Vector Memory)
+- **长期记忆**: pgvector 驱动的语义记忆存储
+- **RAG 集成**: 检索增强生成，上下文感知对话
+- **自动提取**: 从对话中自动提取关键生活事件
+- **语义搜索**: 余弦相似度搜索，智能记忆召回
+- **优雅降级**: 关键词搜索降级机制
+
+### 4层记忆架构
+```
+L3 (向量记忆) ← 长期非结构化记忆，语义搜索
+L2 (认知)     ← 心理画像，顾问策略
+L1 (资产)     ← 结构化资产数据
+L0 (历史)     ← 聊天消息历史
+```
+
 ### 技术特性
 - **高性能**: 异步 FastAPI 框架，支持高并发
-- **数据库**: PostgreSQL + SQLModel ORM
+- **数据库**: PostgreSQL + pgvector + SQLModel ORM
 - **缓存**: Redis 缓存支持
 - **实时通信**: WebSocket 支持
 - **AI 集成**: LangChain + OpenAI 集成
+- **向量搜索**: pgvector HNSW 索引
 - **容器化**: Docker 开发环境支持
 
 ## 🛠 技术栈
 
 - **框架**: FastAPI 0.104+
 - **Python**: 3.11+
-- **数据库**: PostgreSQL 15
+- **数据库**: PostgreSQL 16 + pgvector
 - **ORM**: SQLModel
 - **缓存**: Redis 7
 - **认证**: JWT (python-jose)
 - **AI**: LangChain + OpenAI
+- **向量搜索**: pgvector (1536维)
 - **搜索**: Tavily API
 - **测试**: pytest + hypothesis
 - **代码质量**: Ruff
@@ -36,7 +53,7 @@ AssetFlow 是一个 AI 驱动的家庭资产配置顾问系统的后端服务，
 ## 📋 环境要求
 
 - Python 3.11+
-- PostgreSQL 15+
+- PostgreSQL 16+ (with pgvector extension)
 - Redis 7+
 - Docker & Docker Compose (可选)
 
@@ -47,6 +64,12 @@ AssetFlow 是一个 AI 驱动的家庭资产配置顾问系统的后端服务，
 ```bash
 # 克隆项目
 cd backend
+
+# 初始化数据库（包含 pgvector）
+python init_phase4_db.py
+
+# 验证 Phase 4 安装
+python verify_phase4.py
 
 # 安装 uv (推荐的 Python 包管理器)
 curl -LsSf https://astral.sh/uv/install.sh | sh

@@ -12,7 +12,8 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.models.user import UserAsset, UserProfile
+from app.models.user import AssetType, UserAsset, UserProfile
+from app.models.cognition import UserCognition
 from app.services.asset_extraction_service import asset_extraction_service
 from app.services.information_extraction import extract_information_from_conversation
 from app.services.portfolio_analyzer import portfolio_analyzer
@@ -111,6 +112,13 @@ class ChatAgent:
 * **拒绝机械**：严禁使用"Step 1: xxx"这种机器人的说话方式。将流程内化于对话中。
 * **共情能力**：当用户表达焦虑（如房贷压力、股市亏损）时，先给予情感上的回应和安抚。
 
+**CRITICAL: 信息状态检查规则 (Information State Rules)：**
+* **严格遵循状态检查**：每次回复前，必须查看【当前信息采集状态】部分
+* **禁止重复询问**：对于标记为 [✅] 的项目，绝对不要再次询问相同信息
+* **聚焦缺失信息**：只询问标记为 [❌] 的项目，优先处理最重要的缺失信息
+* **智能过渡策略**：如果 [✅] 房产已知但 [❌] 现金缺失，说："我看到您的房产信息了。为了平衡您的投资组合，请问您目前的现金储备大概有多少？"
+* **避免清单式询问**：不要一次性问多个缺失项目，每次只专注一个核心问题
+
 **标准普尔四象限逻辑 (The Logic)：**
 **要花的钱（10%）**：日常开销和应急资金，建议6个月生活费，存放在高流动性账户
 **保命的钱（20%）**：保险保障，包括重疾险、意外险、寿险等，保障家庭风险
@@ -163,6 +171,17 @@ class ChatAgent:
     ) -> AsyncIterator[str]:
         """Process user message and return streaming response"""
 
+        # Import here to avoid circular imports
+        from app.services.chat_history_service import get_chat_history_service
+        
+        chat_history_service = get_chat_history_service()
+
+        # Save user message immediately
+        try:
+            await chat_history_service.save_user_message(user_id, message)
+        except Exception as e:
+            logger.error(f"Failed to save user message: {e}")
+
         # Handle mock agent case (development environment)
         if not self.has_real_openai_key:
             async for chunk in self._process_message_mock(message, user_id, user_profile):
@@ -188,14 +207,15 @@ class ChatAgent:
             )
 
             # Extract and store information from user message
-            await self._extract_and_store_information(context, message, user_id)
+            # NOTE: Disabled old extraction method in favor of Phase 2 LLM-based extraction
+            # await self._extract_and_store_information(context, message, user_id)
 
             # Prepare input for agent with context
             agent_input = {
                 "messages": [
                     {
                         "role": "user",
-                        "content": self._prepare_contextual_input(message, context),
+                        "content": await self._prepare_contextual_input(message, context, user_id),
                     }
                 ]
             }
@@ -237,6 +257,25 @@ class ChatAgent:
                     len(full_response) :
                 ]  # Only yield the new UI parts
 
+            # Save AI message to database (after generation is complete)
+            try:
+                await chat_history_service.save_ai_message(user_id, ui_enhanced_response)
+            except Exception as e:
+                logger.error(f"Failed to save AI message: {e}")
+
+            # Phase 2: Trigger information extraction and state sync after AI response
+            try:
+                await self._trigger_information_extraction(message, user_id, context)
+            except Exception as e:
+                logger.error(f"Failed to trigger information extraction: {e}")
+            
+            # Phase 3: Trigger cognitive insight analysis (System 2) as background task
+            # This runs asynchronously to avoid blocking the response
+            try:
+                await self._trigger_insight_analysis(user_id, context)
+            except Exception as e:
+                logger.error(f"Failed to trigger insight analysis: {e}")
+
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             yield f"抱歉，处理您的消息时出现了错误：{str(e)}"
@@ -245,6 +284,17 @@ class ChatAgent:
         self, message: str, user_id: int, user_profile: UserProfile | None = None
     ) -> AsyncIterator[str]:
         """Mock message processing for development environment"""
+        
+        # Import here to avoid circular imports
+        from app.services.chat_history_service import get_chat_history_service
+        
+        chat_history_service = get_chat_history_service()
+
+        # Save user message immediately
+        try:
+            await chat_history_service.save_user_message(user_id, message)
+        except Exception as e:
+            logger.error(f"Failed to save user message: {e}")
         
         try:
             # Get or create conversation context
@@ -261,7 +311,8 @@ class ChatAgent:
             )
 
             # Extract and store information from user message
-            await self._extract_and_store_information(context, message, user_id)
+            # NOTE: Disabled old extraction method in favor of Phase 2 LLM-based extraction
+            # await self._extract_and_store_information(context, message, user_id)
 
             # Generate mock response based on conversation stage and message content
             response = self._generate_mock_response(message, context)
@@ -290,6 +341,24 @@ class ChatAgent:
 
             if ui_enhanced_response != response:
                 yield ui_enhanced_response[len(response):]  # Only yield the new UI parts
+
+            # Save AI message to database (after generation is complete)
+            try:
+                await chat_history_service.save_ai_message(user_id, ui_enhanced_response)
+            except Exception as e:
+                logger.error(f"Failed to save AI message: {e}")
+
+            # Phase 2: Trigger information extraction and state sync after AI response
+            try:
+                await self._trigger_information_extraction(message, user_id, context)
+            except Exception as e:
+                logger.error(f"Failed to trigger information extraction: {e}")
+            
+            # Phase 3: Trigger cognitive insight analysis (System 2) as background task
+            try:
+                await self._trigger_insight_analysis(user_id, context)
+            except Exception as e:
+                logger.error(f"Failed to trigger insight analysis: {e}")
 
         except Exception as e:
             logger.error(f"Error processing mock message: {e}")
@@ -380,6 +449,41 @@ class ChatAgent:
         else:
             context.current_stage = "analysis"
 
+    async def _update_cognition_state(self, user_id: int, assets: list, profile: dict | None = None):
+        """Update UserCognition collection status when new information is extracted"""
+        try:
+            from sqlmodel import select
+            from app.core.database import get_db_session
+            
+            async for session in get_db_session():
+                # Get or create UserCognition record
+                cognition_statement = select(UserCognition).where(UserCognition.user_id == user_id)
+                cognition_result = await session.execute(cognition_statement)
+                cognition = cognition_result.scalar_one_or_none()
+                
+                if not cognition:
+                    cognition = UserCognition(user_id=user_id)
+                    session.add(cognition)
+                
+                # Update collection status based on extracted assets
+                for asset in assets:
+                    asset_type = asset.asset_type
+                    cognition.set_collection_status(asset_type, True)
+                
+                # Update risk profile if provided
+                if profile and hasattr(profile, 'risk_preference'):
+                    if not cognition.risk_profile:
+                        cognition.risk_profile = {}
+                    cognition.risk_profile['tolerance'] = profile.risk_preference
+                    cognition.updated_at = datetime.utcnow()
+                
+                await session.commit()
+                logger.info(f"Updated cognition state for user {user_id}")
+                break
+                
+        except Exception as e:
+            logger.error(f"Error updating cognition state: {e}")
+
     async def _extract_and_store_information(
         self, context: ChatContext, user_message: str, user_id: int
     ):
@@ -433,13 +537,262 @@ class ChatAgent:
 
             # Update conversation stage
             self._update_conversation_stage(context, validation)
+            
+            # Update cognition state with extracted information
+            if assets or profile:
+                await self._update_cognition_state(user_id, assets or [], profile)
 
         except Exception as e:
             logger.error(f"Error extracting and storing information: {e}")
 
-    def _prepare_contextual_input(self, message: str, context: ChatContext) -> str:
-        """Prepare input with conversation context for better AI responses"""
-        contextual_parts = [message]
+    async def _trigger_insight_analysis(self, user_id: int, context: ChatContext) -> None:
+        """
+        Phase 3: Trigger cognitive insight analysis (System 2)
+        Analyzes conversation history to generate psychological profile and advisor strategy
+        
+        Optimization: Only trigger every N turns to save tokens
+        """
+        try:
+            # Optimization: Only analyze every 3-5 turns to save API costs
+            # For MVP, we analyze every turn for demonstration
+            message_count = len(context.conversation_history)
+            
+            # Skip if too few messages (need at least 5 for meaningful analysis)
+            if message_count < 5:
+                logger.debug(f"Skipping insight analysis for user {user_id} - only {message_count} messages")
+                return
+            
+            # Optional: Only trigger every N turns (uncomment for production optimization)
+            # if message_count % 5 != 0:
+            #     logger.debug(f"Skipping insight analysis for user {user_id} - not at trigger interval")
+            #     return
+            
+            from app.services.insight_service import get_insight_service
+            
+            insight_service = get_insight_service()
+            
+            # Run analysis (this is fire-and-forget, doesn't block response)
+            logger.info(f"Triggering insight analysis for user {user_id}")
+            analysis_result = await insight_service.analyze_user_psychology(user_id)
+            
+            if analysis_result.get("skipped"):
+                logger.debug(f"Insight analysis skipped: {analysis_result.get('reason')}")
+            elif analysis_result.get("error"):
+                logger.error(f"Insight analysis error: {analysis_result.get('error')}")
+            else:
+                logger.info(f"Insight analysis completed for user {user_id}: sentiment={analysis_result.get('current_sentiment')}")
+            
+        except Exception as e:
+            logger.error(f"Error triggering insight analysis for user {user_id}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+    async def _trigger_information_extraction(self, user_message: str, user_id: int, context: ChatContext):
+        """
+        Phase 2: Trigger information extraction and state synchronization after AI response.
+        This ensures the database is updated for the next turn of conversation.
+        """
+        try:
+            logger.info(f"Starting information extraction for user {user_id}")
+            
+            # Import here to avoid circular imports
+            from app.services.information_extraction import extract_information
+            
+            # Prepare conversation history for LLM context
+            conversation_history = []
+            for msg in context.conversation_history[-10:]:  # Last 10 messages
+                conversation_history.append({
+                    "role": msg.get("role", "user"),
+                    "content": msg.get("content", "")
+                })
+            
+            # Extract information using LLM-based extraction
+            extraction_result = await extract_information(user_message, conversation_history)
+            logger.info(f"Extraction result: {extraction_result}")
+            
+            # Update user state if extraction found anything
+            if (extraction_result.get("assets") or 
+                extraction_result.get("goals") or 
+                extraction_result.get("risk_profile") or 
+                extraction_result.get("completeness_update")):
+                
+                logger.info(f"Found extractable data, calling update_user_state for user {user_id}")
+                success = await asset_extraction_service.update_user_state(user_id, extraction_result)
+                
+                if success:
+                    logger.info(f"Successfully updated user state for user {user_id}")
+                    
+                    # Update context for immediate use
+                    await self._update_context_from_extraction(context, extraction_result)
+                else:
+                    logger.warning(f"Failed to update user state for user {user_id}")
+            else:
+                logger.debug(f"No extractable information found in message from user {user_id}")
+                
+        except Exception as e:
+            logger.error(f"Error in information extraction trigger for user {user_id}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    async def _update_context_from_extraction(self, context: ChatContext, extraction_result: dict):
+        """Update conversation context with extraction results for immediate use"""
+        try:
+            # Update extracted assets in context
+            assets_data = extraction_result.get("assets", [])
+            for asset_data in assets_data:
+                # Add to context.extracted_assets if not already present
+                asset_exists = False
+                for existing in context.extracted_assets:
+                    if (existing.get("asset_type") == asset_data.get("type") and 
+                        existing.get("name") == asset_data.get("name")):
+                        # Update existing
+                        existing.update({
+                            "value": asset_data.get("amount", 0),
+                            "location": asset_data.get("location"),
+                            "area": asset_data.get("area"),
+                            "confidence": 0.8  # High confidence from LLM extraction
+                        })
+                        asset_exists = True
+                        break
+                
+                if not asset_exists:
+                    context.extracted_assets.append({
+                        "asset_type": asset_data.get("type"),
+                        "name": asset_data.get("name", f"{asset_data.get('type')}资产"),
+                        "value": asset_data.get("amount", 0),
+                        "location": asset_data.get("location"),
+                        "area": asset_data.get("area"),
+                        "confidence": 0.8
+                    })
+            
+            # Update user profile in context
+            risk_profile = extraction_result.get("risk_profile", {})
+            if risk_profile:
+                if not context.user_profile:
+                    context.user_profile = {}
+                
+                for key, value in risk_profile.items():
+                    if value:
+                        context.user_profile[key] = value
+            
+            logger.debug(f"Updated context with extraction results")
+            
+        except Exception as e:
+            logger.error(f"Error updating context from extraction: {e}")
+
+    async def _get_advisor_strategy_note(self, user_id: int) -> str | None:
+        """
+        Phase 3: Get advisor strategy note from cognitive insights
+        This provides the AI with psychological profiling to adjust its behavior
+        """
+        try:
+            from app.services.insight_service import get_insight_service
+            
+            insight_service = get_insight_service()
+            advisor_note = await insight_service.get_advisor_strategy(user_id)
+            
+            return advisor_note
+            
+        except Exception as e:
+            logger.error(f"Error getting advisor strategy note: {e}")
+            return None
+
+    async def _generate_state_checklist(self, user_id: int) -> str:
+        """
+        Generate information collection state checklist for LLM context.
+        This prevents repetitive questioning by showing what's already known.
+        """
+        try:
+            from sqlmodel import select
+            from app.core.database import get_db_session
+            
+            checklist_lines = ["【当前信息采集状态 (Information State)】"]
+            
+            async for session in get_db_session():
+                # Check UserAsset (L1) for asset types
+                assets_statement = select(UserAsset).where(UserAsset.user_id == user_id)
+                assets_result = await session.execute(assets_statement)
+                assets = assets_result.scalars().all()
+                
+                # Check UserCognition (L2) for collection status
+                cognition_statement = select(UserCognition).where(UserCognition.user_id == user_id)
+                cognition_result = await session.execute(cognition_statement)
+                cognition = cognition_result.scalar_one_or_none()
+                
+                # Asset type status mapping
+                asset_types = {
+                    "real_estate": "房产 (Real Estate)",
+                    "cash": "现金 (Cash)", 
+                    "investment": "投资 (Investment)",
+                    "insurance": "保险 (Insurance)",
+                    "liability": "负债 (Debt)"
+                }
+                
+                # Track what assets exist in DB
+                existing_assets = {}
+                for asset in assets:
+                    asset_type = asset.asset_type.value
+                    if asset_type not in existing_assets:
+                        existing_assets[asset_type] = []
+                    existing_assets[asset_type].append({
+                        "name": asset.name,
+                        "value": asset.value
+                    })
+                
+                # Generate checklist for each asset type
+                for asset_key, asset_label in asset_types.items():
+                    if asset_key in existing_assets:
+                        # Asset exists - show as collected
+                        asset_info = existing_assets[asset_key][0]  # Show first asset
+                        if asset_key == "real_estate":
+                            value_str = f"{asset_info['value']/10000:.0f}万" if asset_info['value'] >= 10000 else f"{asset_info['value']:.0f}元"
+                            checklist_lines.append(f"[✅] {asset_label}: 已知 ({asset_info['name']}, {value_str})")
+                        else:
+                            value_str = f"{asset_info['value']/10000:.0f}万" if asset_info['value'] >= 10000 else f"{asset_info['value']:.0f}元"
+                            checklist_lines.append(f"[✅] {asset_label}: 已知 ({value_str})")
+                    else:
+                        # Asset missing
+                        checklist_lines.append(f"[❌] {asset_label}: 未知 (Missing)")
+                
+                # Check cognition profile status
+                if cognition and cognition.risk_profile:
+                    risk_info = cognition.risk_profile.get("tolerance", "未知")
+                    checklist_lines.append(f"[✅] 认知画像 (Profile): 风险偏好 {risk_info}")
+                else:
+                    checklist_lines.append(f"[⚠️] 认知画像 (Profile): 缺少风险偏好")
+                
+                break  # Exit the async generator
+            
+            return "\n".join(checklist_lines)
+            
+        except Exception as e:
+            logger.error(f"Error generating state checklist: {e}")
+            return "【当前信息采集状态】\n[⚠️] 状态检查失败"
+
+    async def _prepare_contextual_input(self, message: str, context: ChatContext, user_id: int) -> str:
+        """Prepare input with conversation context and state checklist for better AI responses"""
+        contextual_parts = []
+        
+        # Add state checklist at the beginning (most important context)
+        state_checklist = await self._generate_state_checklist(user_id)
+        contextual_parts.append(state_checklist)
+        
+        # Phase 4: Add relevant memories from L3 Vector Memory (RAG)
+        relevant_memories = await self._retrieve_relevant_memories(user_id, message)
+        if relevant_memories:
+            memory_context = "\n\n🧠 【RELEVANT MEMORIES】\n"
+            for i, memory in enumerate(relevant_memories, 1):
+                memory_context += f"{i}. {memory['content']} (相关度: {memory['similarity']:.2f})\n"
+            memory_context += "[重要提示: 这些是用户之前提到的关键信息，请在回复中考虑这些背景。]"
+            contextual_parts.append(memory_context)
+        
+        # Phase 3: Add advisor strategy note from cognitive insights (System 2)
+        advisor_note = await self._get_advisor_strategy_note(user_id)
+        if advisor_note:
+            contextual_parts.append(f"\n\n💡 【ADVISOR STRATEGY NOTE】\n{advisor_note}\n[重要提示: 根据上述策略调整你的语气和建议方向。用户看不到这条笔记。]")
+        
+        # Add the user's actual message
+        contextual_parts.append(f"\n【用户消息】\n{message}")
 
         # Add context about current stage
         if context.current_stage == "initial":
@@ -486,6 +839,30 @@ class ChatAgent:
                 contextual_parts.append("\n[Tone Hint: Show empathy for financial pressure and focus on practical solutions]")
 
         return "".join(contextual_parts)
+    
+    async def _retrieve_relevant_memories(self, user_id: int, query_text: str) -> list[dict]:
+        """
+        Phase 4: Retrieve relevant memories from L3 Vector Memory
+        Uses semantic search to find contextually relevant past information
+        """
+        try:
+            from app.services.memory_service import get_memory_service
+            
+            memory_service = get_memory_service()
+            
+            # Retrieve top 3 most relevant memories
+            memories = await memory_service.retrieve_relevant(
+                user_id=user_id,
+                query_text=query_text,
+                limit=3,
+                similarity_threshold=0.7  # Only include highly relevant memories
+            )
+            
+            return memories
+            
+        except Exception as e:
+            logger.error(f"Error retrieving relevant memories: {e}")
+            return []
 
     async def _enhance_response_with_ui_components(
         self, response: str, context: ChatContext, user_id: int

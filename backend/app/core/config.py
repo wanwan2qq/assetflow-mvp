@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str | None = None
     OPENAI_API_BASE: str | None = None
     TAVILY_API_KEY: str | None = None
+    
+    # Phase 4: Vector Memory Configuration
+    EMBEDDING_MODEL_NAME: str = "BAAI/bge-large-zh-v1.5"  # Local BGE embedding model (1024 dimensions)
+    USE_LOCAL_EMBEDDING: bool = True  # Use local embedding model instead of OpenAI API
 
     # Environment
     ENVIRONMENT: str = "development"

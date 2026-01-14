@@ -19,6 +19,7 @@ from app.core.auth import get_current_user
 from app.models.user import User
 from app.services.auth import auth_service
 from app.services.chat_agent import get_chat_agent
+from app.services.chat_history_service import get_chat_history_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -299,3 +300,35 @@ async def send_chat_message(
         "ui_components": [comp.model_dump() for comp in ui_components],
         "timestamp": "2024-01-01T00:00:00Z",
     }
+
+
+@router.get("/chat/history")
+async def get_chat_history(
+    limit: int = Query(default=50, ge=1, le=200),
+    current_user: User = Depends(get_current_user)
+):
+    """Get chat history for the current user"""
+    
+    try:
+        chat_history_service = get_chat_history_service()
+        messages = await chat_history_service.get_chat_history(current_user.id, limit)
+        
+        # Convert messages to response format
+        history = []
+        for message in messages:
+            history.append({
+                "id": message.id,
+                "role": message.role.value,
+                "content": message.content,
+                "meta_data": message.meta_data,
+                "timestamp": message.timestamp.isoformat()
+            })
+        
+        return {
+            "messages": history,
+            "total": len(history)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting chat history: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve chat history")

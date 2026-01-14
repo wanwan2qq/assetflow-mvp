@@ -74,7 +74,9 @@ git commit -m "feat: 添加用户认证功能"
 
 # 推送到远程分支
 git push origin feature/your-feature-name
+git push origin main
 ```
+
 
 ### 3. 完成功能开发
 

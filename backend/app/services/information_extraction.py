@@ -1,7 +1,9 @@
 """
 Natural language information extraction for asset and user profile data
+Enhanced with LLM-based extraction for Phase 2 implementation
 """
 
+import json
 import logging
 import re
 from datetime import datetime
@@ -9,6 +11,8 @@ from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -592,3 +596,187 @@ def extract_information_from_conversation(
     validation = information_extractor.validate_extracted_data(assets, profile)
 
     return assets, profile, validation
+
+
+async def extract_information(user_message: str, current_history: list) -> dict:
+    """
+    Phase 2: LLM-based information extraction for automatic state sync.
+    
+    Args:
+        user_message: The user's current message
+        current_history: List of previous conversation messages
+        
+    Returns:
+        dict: Structured extraction result with assets, goals, risk_profile, and completeness_update
+    """
+    try:
+        # Check if we have a valid OpenAI API key
+        if not settings.OPENAI_API_KEY or settings.OPENAI_API_KEY.startswith("sk-mock"):
+            logger.warning("No valid OpenAI API key - using fallback extraction")
+            return await _fallback_extraction(user_message)
+        
+        # Use LLM for structured extraction
+        from langchain_openai import ChatOpenAI
+        
+        llm_kwargs = {
+            "model": "deepseek-chat",
+            "temperature": 0.1,  # Low temperature for consistent extraction
+            "api_key": settings.OPENAI_API_KEY,
+        }
+        
+        if settings.OPENAI_API_BASE:
+            llm_kwargs["base_url"] = settings.OPENAI_API_BASE
+            
+        llm = ChatOpenAI(**llm_kwargs)
+        
+        # Create extraction prompt
+        extraction_prompt = _create_extraction_prompt(user_message, current_history)
+        
+        # Get LLM response
+        response = await llm.ainvoke(extraction_prompt)
+        
+        # Parse JSON response
+        try:
+            result = json.loads(response.content)
+            logger.info(f"LLM extraction successful: {result}")
+            return result
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse LLM response as JSON: {e}")
+            return await _fallback_extraction(user_message)
+            
+    except Exception as e:
+        logger.error(f"Error in LLM extraction: {e}")
+        return await _fallback_extraction(user_message)
+
+
+def _create_extraction_prompt(user_message: str, current_history: list) -> str:
+    """Create system prompt for LLM-based information extraction"""
+    
+    # Build conversation context
+    context_messages = []
+    for msg in current_history[-5:]:  # Last 5 messages for context
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        context_messages.append(f"{role}: {content}")
+    
+    context_str = "\n".join(context_messages) if context_messages else "No previous context"
+    
+    prompt = f"""You are an expert financial information extraction system. Your task is to extract structured information from user messages about their assets, goals, and risk profile.
+
+**CRITICAL INSTRUCTIONS:**
+1. You MUST respond with ONLY valid JSON - no explanations, no markdown, no extra text
+2. Be conservative - only extract information you are confident about
+3. Handle fuzzy numbers (e.g., "about 500k" -> 500000)
+4. Focus on NEW information in the current message
+
+**CONVERSATION CONTEXT:**
+{context_str}
+
+**CURRENT USER MESSAGE:**
+{user_message}
+
+**REQUIRED JSON OUTPUT FORMAT:**
+{{
+    "assets": [
+        {{
+            "type": "cash|real_estate|investment|insurance|liability",
+            "amount": 500000,
+            "currency": "CNY",
+            "name": "具体资产名称",
+            "location": "位置信息(如适用)",
+            "area": 120.5
+        }}
+    ],
+    "goals": ["buy_house", "retirement", "education", "travel"],
+    "risk_profile": {{
+        "tolerance": "low|medium|high",
+        "experience": "beginner|intermediate|advanced",
+        "anxiety": "low|medium|high"
+    }},
+    "completeness_update": {{
+        "cash": true
+    }}
+}}
+
+**EXTRACTION RULES:**
+- assets: Extract specific asset mentions with amounts
+- goals: Extract financial goals mentioned (buy_house, retirement, education, etc.)
+- risk_profile: Extract risk tolerance indicators
+- completeness_update: ONLY include asset types that are mentioned in the current message. Do NOT include asset types that are not mentioned.
+
+**CRITICAL FOR completeness_update:**
+- If user mentions cash, ONLY include "cash": true
+- If user mentions real estate, ONLY include "real_estate": true  
+- Do NOT include other asset types unless explicitly mentioned
+- NEVER set any asset type to false - omit it entirely if not mentioned
+
+**AMOUNT CONVERSION:**
+- "50万" -> 500000
+- "100万" -> 1000000  
+- "1千万" -> 10000000
+- "1亿" -> 100000000
+
+**ASSET TYPE MAPPING:**
+- 房产/房子/住房 -> "real_estate"
+- 现金/存款/银行 -> "cash"
+- 股票/基金/投资 -> "investment"
+- 保险 -> "insurance"
+- 贷款/房贷/债务 -> "liability"
+
+Respond with ONLY the JSON object:"""
+
+    return prompt
+
+
+async def _fallback_extraction(user_message: str) -> dict:
+    """Fallback extraction using rule-based approach when LLM is not available"""
+    
+    # Use existing rule-based extraction
+    assets, profile, validation = extract_information_from_conversation(user_message)
+    
+    # Convert to Phase 2 format
+    result = {
+        "assets": [],
+        "goals": [],
+        "risk_profile": {},
+        "completeness_update": {}
+    }
+    
+    # Convert assets
+    for asset in assets:
+        asset_data = {
+            "type": asset.asset_type.value,
+            "amount": asset.value or 0,
+            "currency": "CNY",
+            "name": asset.name
+        }
+        
+        if asset.location:
+            asset_data["location"] = asset.location
+        if asset.area:
+            asset_data["area"] = asset.area
+            
+        result["assets"].append(asset_data)
+        
+        # Mark completeness
+        result["completeness_update"][asset.asset_type.value] = True
+    
+    # Convert profile
+    if profile:
+        if profile.risk_preference:
+            result["risk_profile"]["tolerance"] = profile.risk_preference
+        
+        # Extract goals from text (simple keyword matching)
+        goal_keywords = {
+            "buy_house": ["买房", "购房", "房子"],
+            "retirement": ["退休", "养老"],
+            "education": ["教育", "学费", "孩子上学"],
+            "travel": ["旅游", "旅行"]
+        }
+        
+        for goal, keywords in goal_keywords.items():
+            if any(keyword in user_message for keyword in keywords):
+                result["goals"].append(goal)
+    
+    logger.info(f"Fallback extraction result: {result}")
+    return result

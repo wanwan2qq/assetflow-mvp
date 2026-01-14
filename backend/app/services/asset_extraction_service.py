@@ -1,14 +1,17 @@
 """
 Service for storing extracted asset and profile information to database
+Enhanced with Phase 2 state synchronization capabilities
 """
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from sqlmodel import Session, select
 
 from app.core.database import get_db_session
 from app.models.user import AssetType, UserAsset, UserProfile
+from app.models.cognition import UserCognition
 from app.services.information_extraction import ExtractedAsset, ExtractedUserProfile
 
 logger = logging.getLogger(__name__)
@@ -277,6 +280,205 @@ class AssetExtractionService:
         # Mark as modified
         session.add(existing_asset)
         logger.info(f"Updated existing asset: {existing_asset.name}")
+
+    async def update_user_state(self, user_id: int, extraction_result: dict) -> bool:
+        """
+        Phase 2: Update user state based on extraction results.
+        
+        Args:
+            user_id: The user ID
+            extraction_result: Dict from extract_information() containing assets, goals, risk_profile, completeness_update
+            
+        Returns:
+            bool: True if update was successful
+        """
+        logger.info(f"🚀 UPDATE_USER_STATE: Starting update_user_state for user {user_id}")
+        logger.info(f"🚀 UPDATE_USER_STATE: extraction_result = {extraction_result}")
+        
+        try:
+            async for session in get_db_session():
+                success = await self._update_user_state_in_session(user_id, extraction_result, session)
+                logger.info(f"🚀 UPDATE_USER_STATE: Result = {success} for user {user_id}")
+                return success
+        except Exception as e:
+            logger.error(f"🚀 UPDATE_USER_STATE: Error updating user state for user {user_id}: {e}")
+            return False
+    
+    async def _update_user_state_in_session(self, user_id: int, extraction_result: dict, session: Session) -> bool:
+        """Update user state within a database session"""
+        try:
+            # L1 Update: Process assets
+            assets_data = extraction_result.get("assets", [])
+            if assets_data:
+                await self._update_assets_from_extraction(user_id, assets_data, session)
+            
+            # L2 Update: Process cognition data
+            await self._update_cognition_from_extraction(user_id, extraction_result, session)
+            
+            # Commit after both L1 and L2 updates
+            await session.commit()
+            logger.info(f"🚀 UPDATE_USER_STATE: ✅ Successfully committed all updates for user {user_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"🚀 UPDATE_USER_STATE: ❌ Error in state update session for user {user_id}: {e}")
+            import traceback
+            logger.error(f"🚀 UPDATE_USER_STATE: Traceback: {traceback.format_exc()}")
+            await session.rollback()
+            return False
+    
+    async def _update_assets_from_extraction(self, user_id: int, assets_data: list, session: Session):
+        """L1 Update: Upsert assets to UserAsset table"""
+        
+        asset_type_mapping = {
+            "real_estate": AssetType.REAL_ESTATE,
+            "cash": AssetType.CASH,
+            "investment": AssetType.INVESTMENT,
+            "insurance": AssetType.INSURANCE,
+            "liability": AssetType.LIABILITY,
+        }
+        
+        for asset_data in assets_data:
+            try:
+                asset_type_str = asset_data.get("type")
+                asset_type = asset_type_mapping.get(asset_type_str)
+                
+                if not asset_type:
+                    logger.warning(f"Unknown asset type: {asset_type_str}")
+                    continue
+                
+                amount = asset_data.get("amount", 1)  # Default to 1 to satisfy constraint
+                if amount is None or amount <= 0:
+                    amount = 1  # Use 1 as placeholder for assets without known value
+                name = asset_data.get("name", f"{asset_type_str}资产")
+                
+                # Check for existing asset of same type
+                existing_statement = select(UserAsset).where(
+                    UserAsset.user_id == user_id,
+                    UserAsset.asset_type == asset_type
+                )
+                existing_result = await session.execute(existing_statement)
+                existing_asset = existing_result.scalar_one_or_none()
+                
+                if existing_asset:
+                    # Update existing asset
+                    existing_asset.value = amount
+                    existing_asset.name = name
+                    
+                    # Update metadata
+                    if not existing_asset.extra_data:
+                        existing_asset.extra_data = {}
+                    
+                    if asset_data.get("location"):
+                        existing_asset.extra_data["location"] = asset_data["location"]
+                    if asset_data.get("area"):
+                        existing_asset.extra_data["area"] = asset_data["area"]
+                    
+                    existing_asset.extra_data["last_updated"] = datetime.now().isoformat()
+                    session.add(existing_asset)
+                    logger.info(f"Updated existing asset: {name} = {amount}")
+                    
+                else:
+                    # Create new asset
+                    extra_data = {}
+                    if asset_data.get("location"):
+                        extra_data["location"] = asset_data["location"]
+                    if asset_data.get("area"):
+                        extra_data["area"] = asset_data["area"]
+                    extra_data["created_from_extraction"] = True
+                    extra_data["extraction_timestamp"] = datetime.now().isoformat()
+                    
+                    new_asset = UserAsset(
+                        user_id=user_id,
+                        asset_type=asset_type,
+                        name=name,
+                        value=amount,
+                        is_confirmed=False,  # Needs user confirmation
+                        extra_data=extra_data
+                    )
+                    
+                    session.add(new_asset)
+                    logger.info(f"Created new asset: {name} = {amount}")
+                    
+            except Exception as e:
+                logger.error(f"Error processing asset {asset_data}: {e}")
+                continue
+    
+    async def _update_cognition_from_extraction(self, user_id: int, extraction_result: dict, session: Session):
+        """L2 Update: Update UserCognition with goals, risk profile, and collection status"""
+        
+        logger.info(f"Starting _update_cognition_from_extraction for user {user_id} with result: {extraction_result}")
+        
+        # Get or create UserCognition record
+        cognition_statement = select(UserCognition).where(UserCognition.user_id == user_id)
+        cognition_result = await session.execute(cognition_statement)
+        cognition = cognition_result.scalar_one_or_none()
+        
+        if not cognition:
+            cognition = UserCognition(user_id=user_id)
+            session.add(cognition)
+        
+        # Update financial goals
+        goals = extraction_result.get("goals", [])
+        if goals:
+            if not cognition.financial_goals:
+                cognition.financial_goals = []
+            
+            # Add new goals (avoid duplicates)
+            for goal in goals:
+                if goal not in cognition.financial_goals:
+                    cognition.financial_goals.append(goal)
+            
+            logger.info(f"Updated financial goals for user {user_id}: {cognition.financial_goals}")
+        
+        # Update risk profile
+        risk_profile = extraction_result.get("risk_profile", {})
+        if risk_profile:
+            if not cognition.risk_profile:
+                cognition.risk_profile = {}
+            
+            # Merge risk profile data
+            for key, value in risk_profile.items():
+                if value:  # Only update non-empty values
+                    cognition.risk_profile[key] = value
+            
+            logger.info(f"Updated risk profile for user {user_id}: {cognition.risk_profile}")
+        
+        # Update collection status
+        completeness_update = extraction_result.get("completeness_update", {})
+        logger.info(f"Processing completeness_update for user {user_id}: {completeness_update}")
+        
+        if completeness_update:
+            if not cognition.collection_status:
+                cognition.collection_status = {}
+            
+            logger.info(f"Current collection_status before update: {cognition.collection_status}")
+            
+            # Update collection status for each asset type
+            # IMPORTANT: Only update items that are True, preserve existing True values
+            collection_status_changed = False
+            for asset_type, is_collected in completeness_update.items():
+                logger.info(f"Processing {asset_type}: {is_collected} for user {user_id}")
+                if is_collected:  # Only mark as collected if True
+                    cognition.collection_status[asset_type] = True
+                    collection_status_changed = True
+                    logger.info(f"Marked {asset_type} as collected for user {user_id}")
+                # Do NOT set to False if already True - preserve existing collection status
+            
+            # CRITICAL: Tell SQLAlchemy that the JSON field has been modified
+            if collection_status_changed:
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(cognition, 'collection_status')
+                logger.info(f"Flagged collection_status as modified for SQLAlchemy")
+            
+            logger.info(f"Final collection_status after update: {cognition.collection_status}")
+        else:
+            logger.info(f"No completeness_update provided for user {user_id}")
+        
+        # Update timestamp
+        cognition.updated_at = datetime.now()
+        session.add(cognition)
+        logger.info(f"Added cognition to session for user {user_id}")
 
     async def get_extraction_summary(self, user_id: int) -> dict[str, Any]:
         """Get summary of extracted information for a user"""
