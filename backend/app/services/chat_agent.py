@@ -103,7 +103,7 @@ class ChatAgent:
     def _create_agent(self):
         """Create LangChain agent with tools"""
 
-        # Define the system prompt with Senior Private Banker persona
+        # Define the system prompt with Senior Private Banker persona + Chain of Thought
         system_prompt = """你不仅仅是AI，你是AssetFlow的首席资产配置专家（Chief Asset Allocation Expert）。你的目标是不仅提供数据，更提供"财务安全感"。
 
 **核心人设 (Persona)：**
@@ -112,12 +112,55 @@ class ChatAgent:
 * **拒绝机械**：严禁使用"Step 1: xxx"这种机器人的说话方式。将流程内化于对话中。
 * **共情能力**：当用户表达焦虑（如房贷压力、股市亏损）时，先给予情感上的回应和安抚。
 
+**【思考指令 (Chain of Thought - Internal Reasoning)】**
+在回答用户之前，你必须先进行内部思考分析（这个思考过程用户看不到，仅用于你的推理）：
+
+<Thought>
+1. **Fact Check (事实核查)**: 
+   - 对比 [Fact Sheet]，检查用户的请求是否与已知数据一致
+   - 例如：用户说"投资100万"，但 Fact Sheet 显示现金为0 → 标记为矛盾，需要澄清
+   
+2. **History Context (历史上下文)**:
+   - 检查 [Recent Conversation History]，理解用户的引用（如"那个"、"之前的"、"改成"）
+   - 例如：用户说"改成50万" → 查看历史，确定是指哪个资产
+   
+3. **Strategy Check (策略检查)**:
+   - 参考 [Advisor Strategy Note]，确定当前应该采用的语气和策略
+   - 是"Comfort Mode"（安抚焦虑）还是"Growth Mode"（激励行动）？
+   
+4. **Intent Analysis (意图分析)**:
+   - 用户真正想要什么？是信息查询、配置建议、还是情感支持？
+   - 识别隐藏需求（如表面问投资，实际是焦虑房贷压力）
+   
+5. **Response Plan (回复计划)**:
+   - 决定回复的语气（共情 vs 专业 vs 激励）
+   - 确定关键要点（先安抚情绪 → 再给建议 → 最后询问细节）
+   - 检查是否需要生成 UI Widget（VALUATION_CARD, ACTION_CARD, PORTFOLIO_CHART）
+</Thought>
+
+**重要提示**: 
+- <Thought> 块是你的内部推理过程，用户看不到
+- 完成思考后，直接输出你的回复，不要在回复中提及"我刚才思考了..."
+- 这个思考过程确保你的回复基于事实、符合策略、理解上下文
+
+**Natural Conversation Flow (自然对话流程)：**
+* **像资深顾问一样思考**：你是一位经验丰富的财务顾问，不是填表机器人。如果用户提到某个话题（如负债），自然地深入探讨相关内容（如月供压力、还款计划），而不是机械地跳到下一个清单项目。
+* **顺势而为**：跟随用户的话题自然展开对话。如果用户主动分享某类资产的细节，继续深入了解该资产，而不是打断话题去问其他类别。
+* **避免问卷式对话**：绝对不要像填问卷一样"依次询问"各个类别。让对话像朋友聊天一样自然流动。
+* **接受模糊完成信号**：当用户说"就这些了"、"没有其他的了"、"暂时想不到了"时，接受这个信号，不要反复追问。可以将缺失的资产类别标记为"暂无"或"0"，然后基于现有信息给出建议。
+
+**Context Awareness (情境感知)：**
+* **情绪优先于数据**：如果用户表达焦虑、压力或困惑，立即暂停信息收集，优先处理他们的情绪。给予共情和安抚，然后再考虑是否继续收集信息。
+* **灵活调整节奏**：根据用户的状态调整对话节奏。如果用户显得疲惫或不耐烦，不要继续追问细节，而是基于现有信息给出初步建议。
+* **尊重用户边界**：如果用户对某个话题不愿深入（如具体收入、负债细节），不要强求，转而讨论其他方面或给出基于假设的建议。
+
 **CRITICAL: 信息状态检查规则 (Information State Rules)：**
 * **严格遵循状态检查**：每次回复前，必须查看【当前信息采集状态】部分
 * **禁止重复询问**：对于标记为 [✅] 的项目，绝对不要再次询问相同信息
 * **聚焦缺失信息**：只询问标记为 [❌] 的项目，优先处理最重要的缺失信息
 * **智能过渡策略**：如果 [✅] 房产已知但 [❌] 现金缺失，说："我看到您的房产信息了。为了平衡您的投资组合，请问您目前的现金储备大概有多少？"
 * **避免清单式询问**：不要一次性问多个缺失项目，每次只专注一个核心问题
+* **接受"完成"信号**：当用户表示"就这些"、"没了"、"暂时这样"时，不要继续追问缺失项，而是说："好的，我明白了。基于您目前的资产情况，让我为您分析一下..."
 
 **标准普尔四象限逻辑 (The Logic)：**
 **要花的钱（10%）**：日常开销和应急资金，建议6个月生活费，存放在高流动性账户
@@ -222,6 +265,9 @@ class ChatAgent:
 
             # Stream response from agent
             response_chunks = []
+            thought_content = []  # Store thought content for logging
+            in_thought_block = False
+            
             async for chunk in self.agent.astream(agent_input):
                 # Handle different chunk structures from LangGraph
                 messages = None
@@ -235,26 +281,37 @@ class ChatAgent:
                         if hasattr(msg, "content") and msg.content:
                             chunk_text = msg.content
                             response_chunks.append(chunk_text)
-                            yield chunk_text
+                            # Don't yield yet - we'll filter thought blocks first
 
-            # Store AI response in history
+            # Combine all chunks and filter out <Thought> blocks
             full_response = "".join(response_chunks)
+            filtered_response, thought_text = self._filter_thought_blocks(full_response)
+            
+            # Log thought content to console for debugging
+            if thought_text:
+                logger.info(f"🧠 CHAIN OF THOUGHT (User {user_id}):\n{thought_text}")
+            
+            # Yield the filtered response (without <Thought> blocks)
+            if filtered_response:
+                yield filtered_response
+            
+            # Store AI response in history (use filtered response without <Thought> blocks)
             context.conversation_history.append(
                 {
                     "role": "assistant",
-                    "content": full_response,
+                    "content": filtered_response,
                     "timestamp": datetime.now().isoformat(),
                 }
             )
 
             # Generate and inject UI components based on context
             ui_enhanced_response = await self._enhance_response_with_ui_components(
-                full_response, context, user_id
+                filtered_response, context, user_id
             )
 
-            if ui_enhanced_response != full_response:
+            if ui_enhanced_response != filtered_response:
                 yield ui_enhanced_response[
-                    len(full_response) :
+                    len(filtered_response) :
                 ]  # Only yield the new UI parts
 
             # Save AI message to database (after generation is complete)
@@ -264,8 +321,14 @@ class ChatAgent:
                 logger.error(f"Failed to save AI message: {e}")
 
             # Phase 2: Trigger information extraction and state sync after AI response
+            # CRITICAL: This must happen BEFORE the next turn to ensure context is fresh
             try:
                 await self._trigger_information_extraction(message, user_id, context)
+                
+                # PHASE 1 FIX: Context Refresh (System 1 - Immediate Consistency)
+                # Force reload user state from DB to ensure AI sees the latest data in next turn
+                await self._refresh_context_from_db(user_id, context)
+                
             except Exception as e:
                 logger.error(f"Failed to trigger information extraction: {e}")
             
@@ -349,8 +412,14 @@ class ChatAgent:
                 logger.error(f"Failed to save AI message: {e}")
 
             # Phase 2: Trigger information extraction and state sync after AI response
+            # CRITICAL: This must happen BEFORE the next turn to ensure context is fresh
             try:
                 await self._trigger_information_extraction(message, user_id, context)
+                
+                # PHASE 1 FIX: Context Refresh (System 1 - Immediate Consistency)
+                # Force reload user state from DB to ensure AI sees the latest data in next turn
+                await self._refresh_context_from_db(user_id, context)
+                
             except Exception as e:
                 logger.error(f"Failed to trigger information extraction: {e}")
             
@@ -373,10 +442,18 @@ class ChatAgent:
         stress_keywords = ["压力", "焦虑", "担心", "困难", "亏损", "负债", "房贷"]
         has_stress = any(keyword in message_lower for keyword in stress_keywords)
         
+        # Check for completion signals
+        completion_signals = ["就这些", "没了", "没有了", "暂时这样", "就这样", "没有其他", "想不到了"]
+        is_completion = any(signal in message_lower for signal in completion_signals)
+        
+        # Handle completion signals - accept and move forward
+        if is_completion:
+            return "好的，我明白了 🤝 基于您目前提供的资产情况，让我为您做一个初步分析...\n\n根据标准普尔四象限模型，我会帮您评估现有资产的配置情况，并给出优化建议。如果之后想到其他资产信息，随时可以补充给我 💡"
+        
         # Greeting responses with warm persona
         if any(greeting in message_lower for greeting in ["你好", "hello", "hi", "您好"]):
             if context.current_stage == "initial":
-                return "您好！🤝 我是AssetFlow的首席资产配置专家，很高兴为您服务！我不只是提供数据分析，更希望能给您带来财务安全感。\n\n让我们从了解您的资产情况开始吧 💡 - 请问您目前有房产吗？不用担心信息不全，我们可以边聊边完善。"
+                return "您好！🤝 我是AssetFlow的首席资产配置专家，很高兴为您服务！我不只是提供数据分析，更希望能给您带来财务安全感。\n\n有什么财务问题想要探讨吗？或者我们可以从了解您的资产情况开始 💡"
             else:
                 return "您好！很高兴继续为您服务 🤝 有什么新的财务问题想要探讨吗？"
         
@@ -406,16 +483,16 @@ class ChatAgent:
         # Asset-related responses with guidance
         if any(word in message_lower for word in ["资产", "投资", "理财", "存款", "股票", "基金"]):
             if has_stress:
-                return "我理解投资有时会让人感到压力 🤝 这很正常，让我们一起梳理一下您的资产情况，找到最适合的配置方案。\n\n除了房产，请告诉我您目前的：\n💰 现金储蓄大概有多少？\n📈 投资产品（股票、基金等）情况如何？\n🛡️ 保险配置是否完善？\n\n我会根据标准普尔四象限模型为您分析，帮您找到平衡点。"
+                return "我理解投资有时会让人感到压力 🤝 这很正常。让我们一起看看您的资产情况，找到让您更安心的配置方案。\n\n您方便的话，可以跟我聊聊目前的资产情况。不用一次性说完，我们可以慢慢聊 💡"
             else:
-                return "很好！💡 全面了解资产情况是制定配置方案的基础。让我们按四象限来梳理：\n\n🔹 **流动资金**：现金储蓄有多少？\n🔹 **投资产品**：股票、基金等情况？\n🔹 **保险保障**：重疾险、意外险是否配置？\n🔹 **负债情况**：房贷或其他负债？\n\n不用一次性全部说完，我们可以一项项来聊 🤝"
+                return "很好！💡 了解资产情况能帮我为您制定更合适的配置方案。\n\n您可以跟我聊聊目前的资产情况，比如房产、现金储蓄、投资产品等。不用担心信息不全，我们可以边聊边完善 🤝"
         
         # Analysis requests with empathy
         if any(word in message_lower for word in ["分析", "建议", "配置", "怎么办", "如何"]):
             if len(context.extracted_assets) >= 1:
-                return "基于您提供的信息，让我为您分析标准普尔四象限资产配置 📊\n\n**四象限配置逻辑：**\n🔹 **要花的钱（10%）**：应急资金，6个月生活费\n🔹 **保命的钱（20%）**：保险保障，守护家庭\n🔹 **生钱的钱（30%）**：高收益投资，财富增长\n🔹 **保本升值（40%）**：稳健投资，保值增值\n\n根据您的情况，我建议优先完善应急资金储备和保险保障 💡 这样能给您更多安全感。"
+                return "基于您提供的信息，让我为您分析标准普尔四象限资产配置 📊\n\n**四象限配置逻辑：**\n🔹 **要花的钱（10%）**：应急资金，6个月生活费\n🔹 **保命的钱（20%）**：保险保障，守护家庭\n🔹 **生钱的钱（30%）**：高收益投资，财富增长\n🔹 **保本升值（40%）**：稳健投资，保值增值\n\n根据您的情况，我建议优先完善应急资金储备和保险保障 💡 这样能给您更多安全感。如果您还有其他资产信息想补充，随时告诉我。"
             else:
-                return "我很乐意为您提供配置建议！💡 不过为了给出最适合您的方案，我需要先了解您的资产情况。\n\n我们可以从最重要的开始：\n🏠 房产情况（位置、价值）\n💰 现金储蓄\n📈 现有投资\n\n有了这些信息，我就能基于标准普尔四象限模型为您制定个性化方案了 🤝"
+                return "我很乐意为您提供配置建议！💡 不过为了给出最适合您的方案，我想先了解一下您的资产情况。\n\n您可以跟我聊聊目前的资产，比如房产、现金储蓄、投资等。有多少说多少，我会基于现有信息给您初步建议 🤝"
         
         # Numbers or financial amounts with encouragement
         if any(char.isdigit() for char in message):
@@ -426,11 +503,11 @@ class ChatAgent:
         
         # Default responses based on conversation stage with warm tone
         if context.current_stage == "initial":
-            return "我是您的首席资产配置专家 🤝 让我们从了解您的房产情况开始吧！这是很多家庭最重要的资产。请问您目前有房产吗？在哪个城市呢？"
+            return "我是您的首席资产配置专家 🤝 有什么财务问题想要探讨吗？\n\n如果您想了解资产配置建议，我们可以从您的资产情况聊起。您方便的话，可以跟我说说目前的资产情况 💡"
         elif context.current_stage == "property_collection":
-            return "很好，房产信息我们已经有了基础了解 🏠 现在让我们看看其他资产情况。比如您手头的现金储蓄大概有多少？这对应四象限中的'要花的钱'部分。"
+            return "很好，我对您的房产情况有了基本了解 🏠 \n\n如果您还有其他资产想一起考虑（比如现金储蓄、投资等），可以告诉我。这样我能给您更全面的配置建议 💡"
         elif context.current_stage == "asset_collection":
-            return "资产信息收集得不错！💡 为了给您更精准的四象限配置建议，我还想了解一下您的个人情况：年龄段、家庭结构，以及您对投资风险的接受程度如何？"
+            return "资产信息收集得不错！💡 如果您方便的话，可以跟我聊聊您的个人情况，比如年龄段、家庭结构，以及对投资风险的接受程度。这能帮我给出更精准的四象限配置建议 🤝"
         else:
             return "基于您提供的信息，我建议按照标准普尔四象限模型进行资产配置 📊 您还有什么具体问题想了解吗？我很乐意为您详细解答 🤝"
 
@@ -448,6 +525,32 @@ class ChatAgent:
             context.current_stage = "asset_collection"
         else:
             context.current_stage = "analysis"
+
+    def _filter_thought_blocks(self, text: str) -> tuple[str, str]:
+        """
+        Filter out <Thought> blocks from AI response.
+        
+        Returns:
+            tuple: (filtered_text, thought_content)
+                - filtered_text: Response without <Thought> blocks (shown to user)
+                - thought_content: Extracted thought content (logged to console)
+        """
+        import re
+        
+        # Pattern to match <Thought>...</Thought> blocks (case-insensitive, multiline)
+        thought_pattern = r'<Thought>(.*?)</Thought>'
+        
+        # Extract all thought blocks
+        thought_matches = re.findall(thought_pattern, text, re.IGNORECASE | re.DOTALL)
+        thought_content = "\n---\n".join(thought_matches) if thought_matches else ""
+        
+        # Remove thought blocks from response
+        filtered_text = re.sub(thought_pattern, '', text, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Clean up extra whitespace
+        filtered_text = re.sub(r'\n\s*\n\s*\n', '\n\n', filtered_text).strip()
+        
+        return filtered_text, thought_content
 
     async def _update_cognition_state(self, user_id: int, assets: list, profile: dict | None = None):
         """Update UserCognition collection status when new information is extracted"""
@@ -544,6 +647,105 @@ class ChatAgent:
 
         except Exception as e:
             logger.error(f"Error extracting and storing information: {e}")
+
+    async def _refresh_context_from_db(self, user_id: int, context: ChatContext) -> None:
+        """
+        PHASE 1 FIX: Context Refresh (System 1 - Immediate Consistency)
+        
+        Force reload user state from DB after extraction to ensure the AI sees
+        the latest data in the next turn. This prevents "stale context" issues
+        where the AI doesn't know information the user just provided.
+        
+        This is the CRITICAL missing piece that causes the "I am 35 years old"
+        -> "How old are you?" bug.
+        """
+        try:
+            from sqlmodel import select
+            from app.core.database import get_db_session
+            
+            logger.info(f"🔄 CONTEXT_REFRESH: Starting context refresh for user {user_id}")
+            
+            async for session in get_db_session():
+                # Reload UserProfile (L1) - age, family, occupation, income, etc.
+                profile_statement = select(UserProfile).where(UserProfile.user_id == user_id)
+                profile_result = await session.execute(profile_statement)
+                profile = profile_result.scalar_one_or_none()
+                
+                if profile:
+                    # Update context.user_profile with fresh data
+                    context.user_profile = {
+                        "age_range": profile.age_range,
+                        "family_structure": profile.family_structure,
+                        "monthly_expense": profile.monthly_expense,
+                        "risk_preference": profile.risk_preference.value if hasattr(profile.risk_preference, 'value') else profile.risk_preference,
+                        "occupation": profile.occupation,
+                        "income_range": profile.income_range,
+                    }
+                    logger.info(f"🔄 CONTEXT_REFRESH: Updated user_profile in context: {context.user_profile}")
+                else:
+                    logger.info(f"🔄 CONTEXT_REFRESH: No UserProfile found for user {user_id}")
+                
+                # Reload UserAssets (L1) - all confirmed and extracted assets
+                assets_statement = select(UserAsset).where(UserAsset.user_id == user_id)
+                assets_result = await session.execute(assets_statement)
+                assets = assets_result.scalars().all()
+                
+                # Update context.extracted_assets with fresh data
+                context.extracted_assets = []
+                for asset in assets:
+                    asset_dict = {
+                        "asset_type": asset.asset_type.value,
+                        "name": asset.name,
+                        "value": asset.value,
+                        "is_confirmed": asset.is_confirmed,
+                        "confidence": 0.9 if asset.is_confirmed else 0.7,
+                    }
+                    
+                    # Add extra data if available
+                    if asset.extra_data:
+                        if "location" in asset.extra_data:
+                            asset_dict["location"] = asset.extra_data["location"]
+                        if "area" in asset.extra_data:
+                            asset_dict["area"] = asset.extra_data["area"]
+                    
+                    context.extracted_assets.append(asset_dict)
+                
+                logger.info(f"🔄 CONTEXT_REFRESH: Updated {len(context.extracted_assets)} assets in context")
+                
+                # Reload UserCognition (L2) - collection status, goals, psychological profile
+                cognition_statement = select(UserCognition).where(UserCognition.user_id == user_id)
+                cognition_result = await session.execute(cognition_statement)
+                cognition = cognition_result.scalar_one_or_none()
+                
+                if cognition:
+                    # Update conversation stage based on collection status
+                    if cognition.collection_status:
+                        collected_count = sum(1 for v in cognition.collection_status.values() if v)
+                        if collected_count == 0:
+                            context.current_stage = "initial"
+                        elif collected_count <= 2:
+                            context.current_stage = "property_collection"
+                        elif collected_count <= 4:
+                            context.current_stage = "asset_collection"
+                        else:
+                            context.current_stage = "analysis"
+                        
+                        logger.info(f"🔄 CONTEXT_REFRESH: Updated stage to {context.current_stage} (collected: {collected_count})")
+                    
+                    # Add financial goals to context if available
+                    if cognition.financial_goals:
+                        if not context.user_profile:
+                            context.user_profile = {}
+                        context.user_profile["financial_goals"] = cognition.financial_goals
+                        logger.info(f"🔄 CONTEXT_REFRESH: Added financial goals: {cognition.financial_goals}")
+                
+                logger.info(f"🔄 CONTEXT_REFRESH: ✅ Context refresh complete for user {user_id}")
+                break  # Exit the async generator
+                
+        except Exception as e:
+            logger.error(f"🔄 CONTEXT_REFRESH: ❌ Error refreshing context for user {user_id}: {e}")
+            import traceback
+            logger.error(f"🔄 CONTEXT_REFRESH: Traceback: {traceback.format_exc()}")
 
     async def _trigger_insight_analysis(self, user_id: int, context: ChatContext) -> None:
         """
@@ -697,85 +899,188 @@ class ChatAgent:
             logger.error(f"Error getting advisor strategy note: {e}")
             return None
 
-    async def _generate_state_checklist(self, user_id: int) -> str:
+    async def _generate_fact_sheet(self, user_id: int) -> str:
         """
-        Generate information collection state checklist for LLM context.
-        This prevents repetitive questioning by showing what's already known.
+        Generate detailed Fact Sheet of confirmed assets and user profile to prevent AI hallucination.
+        This replaces the simple checklist with a structured summary of actual data.
+        
+        FIXED: Now includes complete UserProfile information (age, family, occupation, income)
         """
         try:
             from sqlmodel import select
             from app.core.database import get_db_session
             
-            checklist_lines = ["【当前信息采集状态 (Information State)】"]
+            fact_lines = ["【当前系统已确信的用户信息 (Fact Sheet)】"]
             
             async for session in get_db_session():
-                # Check UserAsset (L1) for asset types
+                # FIXED: Get UserProfile (L1) for complete user information
+                profile_statement = select(UserProfile).where(UserProfile.user_id == user_id)
+                profile_result = await session.execute(profile_statement)
+                profile = profile_result.scalar_one_or_none()
+                
+                # Get all user assets from DB
                 assets_statement = select(UserAsset).where(UserAsset.user_id == user_id)
                 assets_result = await session.execute(assets_statement)
                 assets = assets_result.scalars().all()
                 
-                # Check UserCognition (L2) for collection status
+                # Check UserCognition (L2) for collection status and psychological insights
                 cognition_statement = select(UserCognition).where(UserCognition.user_id == user_id)
                 cognition_result = await session.execute(cognition_statement)
                 cognition = cognition_result.scalar_one_or_none()
                 
-                # Asset type status mapping
-                asset_types = {
-                    "real_estate": "房产 (Real Estate)",
-                    "cash": "现金 (Cash)", 
-                    "investment": "投资 (Investment)",
-                    "insurance": "保险 (Insurance)",
-                    "liability": "负债 (Debt)"
-                }
-                
-                # Track what assets exist in DB
-                existing_assets = {}
-                for asset in assets:
-                    asset_type = asset.asset_type.value
-                    if asset_type not in existing_assets:
-                        existing_assets[asset_type] = []
-                    existing_assets[asset_type].append({
-                        "name": asset.name,
-                        "value": asset.value
-                    })
-                
-                # Generate checklist for each asset type
-                for asset_key, asset_label in asset_types.items():
-                    if asset_key in existing_assets:
-                        # Asset exists - show as collected
-                        asset_info = existing_assets[asset_key][0]  # Show first asset
-                        if asset_key == "real_estate":
-                            value_str = f"{asset_info['value']/10000:.0f}万" if asset_info['value'] >= 10000 else f"{asset_info['value']:.0f}元"
-                            checklist_lines.append(f"[✅] {asset_label}: 已知 ({asset_info['name']}, {value_str})")
-                        else:
-                            value_str = f"{asset_info['value']/10000:.0f}万" if asset_info['value'] >= 10000 else f"{asset_info['value']:.0f}元"
-                            checklist_lines.append(f"[✅] {asset_label}: 已知 ({value_str})")
-                    else:
-                        # Asset missing
-                        checklist_lines.append(f"[❌] {asset_label}: 未知 (Missing)")
-                
-                # Check cognition profile status
-                if cognition and cognition.risk_profile:
-                    risk_info = cognition.risk_profile.get("tolerance", "未知")
-                    checklist_lines.append(f"[✅] 认知画像 (Profile): 风险偏好 {risk_info}")
+                # FIXED: Add complete user profile information at the top
+                if profile:
+                    fact_lines.append("\n【用户基本画像】")
+                    
+                    # Age range
+                    if profile.age_range:
+                        fact_lines.append(f"• 年龄段: {profile.age_range}岁")
+                    
+                    # Family structure
+                    if profile.family_structure:
+                        family_map = {
+                            "single": "单身",
+                            "married": "已婚",
+                            "married_with_kids": "已婚有子女",
+                            "divorced": "离异",
+                            "widowed": "丧偶"
+                        }
+                        family_str = family_map.get(profile.family_structure, profile.family_structure)
+                        fact_lines.append(f"• 家庭结构: {family_str}")
+                    
+                    # Occupation
+                    if profile.occupation:
+                        fact_lines.append(f"• 职业: {profile.occupation}")
+                    
+                    # Income range
+                    if profile.income_range:
+                        fact_lines.append(f"• 收入范围: {profile.income_range}")
+                    
+                    # Monthly expense
+                    if profile.monthly_expense:
+                        expense_str = f"{profile.monthly_expense/10000:.1f}万" if profile.monthly_expense >= 10000 else f"{profile.monthly_expense:.0f}元"
+                        fact_lines.append(f"• 月支出: {expense_str}")
+                    
+                    # Risk preference
+                    if profile.risk_preference:
+                        risk_map = {
+                            "conservative": "保守型",
+                            "moderate": "稳健型",
+                            "aggressive": "激进型"
+                        }
+                        risk_str = risk_map.get(profile.risk_preference.value if hasattr(profile.risk_preference, 'value') else profile.risk_preference, "未知")
+                        fact_lines.append(f"• 风险偏好: {risk_str}")
                 else:
-                    checklist_lines.append(f"[⚠️] 认知画像 (Profile): 缺少风险偏好")
+                    fact_lines.append("\n【用户基本画像】")
+                    fact_lines.append("(暂无用户画像信息)")
+                
+                # Add financial goals if available
+                if cognition and cognition.financial_goals:
+                    goal_map = {
+                        "retirement": "退休规划",
+                        "buy_house": "购房",
+                        "education": "子女教育",
+                        "wealth_growth": "财富增长"
+                    }
+                    goals_str = ", ".join([goal_map.get(g, g) for g in cognition.financial_goals])
+                    fact_lines.append(f"• 财务目标: {goals_str}")
+                
+                # Assets section
+                fact_lines.append("\n【资产清单】")
+                
+                if not assets:
+                    fact_lines.append("(暂无已确认资产)")
+                else:
+                    # Group assets by type for better organization
+                    assets_by_type = {}
+                    for asset in assets:
+                        asset_type = asset.asset_type.value
+                        if asset_type not in assets_by_type:
+                            assets_by_type[asset_type] = []
+                        assets_by_type[asset_type].append(asset)
+                    
+                    # Generate detailed fact sheet entries
+                    asset_index = 1
+                    for asset_type, asset_list in assets_by_type.items():
+                        for asset in asset_list:
+                            # Format value
+                            value_str = f"{asset.value/10000:.0f}万" if asset.value >= 10000 else f"{asset.value:.0f}元"
+                            
+                            # Build fact line based on asset type
+                            if asset_type == "real_estate":
+                                # Real estate: show location, value, area
+                                location = asset.extra_data.get("location", "未知位置") if asset.extra_data else "未知位置"
+                                area = asset.extra_data.get("area") if asset.extra_data else None
+                                area_str = f" | 面积: {area}平米" if area else " | 面积: 未知"
+                                confirmation = " (用户已确认)" if asset.is_confirmed else " (系统推测)"
+                                fact_lines.append(
+                                    f"{asset_index}. [房产] {asset.name} | 估值: {value_str}{area_str} | 位置: {location}{confirmation}"
+                                )
+                            elif asset_type == "cash":
+                                confirmation = " (用户已确认)" if asset.is_confirmed else " (系统推测)"
+                                fact_lines.append(
+                                    f"{asset_index}. [现金] {value_str}{confirmation}"
+                                )
+                            elif asset_type == "investment":
+                                confirmation = " (用户已确认)" if asset.is_confirmed else " (系统推测)"
+                                fact_lines.append(
+                                    f"{asset_index}. [投资] {asset.name} | 价值: {value_str}{confirmation}"
+                                )
+                            elif asset_type == "insurance":
+                                confirmation = " (用户已确认)" if asset.is_confirmed else " (系统推测)"
+                                fact_lines.append(
+                                    f"{asset_index}. [保险] {asset.name} | 保额: {value_str}{confirmation}"
+                                )
+                            elif asset_type == "liability":
+                                confirmation = " (用户已确认)" if asset.is_confirmed else " (系统推测)"
+                                fact_lines.append(
+                                    f"{asset_index}. [负债] {asset.name} | 金额: {value_str}{confirmation}"
+                                )
+                            
+                            asset_index += 1
+                
+                # Add missing asset types as hints
+                fact_lines.append("\n【缺失信息提示】")
+                asset_types_present = {asset.asset_type.value for asset in assets}
+                missing_types = []
+                
+                if "real_estate" not in asset_types_present:
+                    missing_types.append("房产")
+                if "cash" not in asset_types_present:
+                    missing_types.append("现金储蓄")
+                if "investment" not in asset_types_present:
+                    missing_types.append("投资产品")
+                if "insurance" not in asset_types_present:
+                    missing_types.append("保险保障")
+                
+                if missing_types:
+                    fact_lines.append(f"尚未了解: {', '.join(missing_types)}")
+                else:
+                    fact_lines.append("资产类型信息较完整")
+                
+                fact_lines.append("\n[重要提示] 请基于以上已确认的用户信息和资产数据回答问题，严禁编造或假设未提供的数据。")
                 
                 break  # Exit the async generator
             
-            return "\n".join(checklist_lines)
+            return "\n".join(fact_lines)
             
         except Exception as e:
-            logger.error(f"Error generating state checklist: {e}")
-            return "【当前信息采集状态】\n[⚠️] 状态检查失败"
+            logger.error(f"Error generating fact sheet: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return "【当前系统已确信的用户信息】\n(数据加载失败)"
 
     async def _prepare_contextual_input(self, message: str, context: ChatContext, user_id: int) -> str:
-        """Prepare input with conversation context and state checklist for better AI responses"""
+        """
+        Prepare input with conversation context and Fact Sheet for better AI responses
+        
+        CRITICAL FIX: Now includes L0 Sliding Window History to prevent context discontinuity
+        """
         contextual_parts = []
         
-        # Add state checklist at the beginning (most important context)
-        state_checklist = await self._generate_state_checklist(user_id)
-        contextual_parts.append(state_checklist)
+        # Add Fact Sheet at the beginning (most important context to prevent hallucination)
+        fact_sheet = await self._generate_fact_sheet(user_id)
+        contextual_parts.append(fact_sheet)
         
         # Phase 4: Add relevant memories from L3 Vector Memory (RAG)
         relevant_memories = await self._retrieve_relevant_memories(user_id, message)
@@ -787,12 +1092,44 @@ class ChatAgent:
             contextual_parts.append(memory_context)
         
         # Phase 3: Add advisor strategy note from cognitive insights (System 2)
+        # ENHANCED: Dynamic Tone Refinement based on advisor note
         advisor_note = await self._get_advisor_strategy_note(user_id)
         if advisor_note:
-            contextual_parts.append(f"\n\n💡 【ADVISOR STRATEGY NOTE】\n{advisor_note}\n[重要提示: 根据上述策略调整你的语气和建议方向。用户看不到这条笔记。]")
+            contextual_parts.append(
+                f"\n\n💡 【ADVISOR STRATEGY NOTE】\n{advisor_note}\n"
+                f"[Tone Instruction]: Based on the Advisor Note above, adopt this persona strictly. "
+                f"Adjust your empathy level, risk tolerance guidance, and communication style accordingly. "
+                f"The user cannot see this note - it's for your internal guidance only."
+            )
         
-        # Add the user's actual message
-        contextual_parts.append(f"\n【用户消息】\n{message}")
+        # FIX #1: Inject L0 Sliding Window History (6-10 recent messages)
+        # This prevents "context discontinuity" where AI forgets what user just said
+        if context.conversation_history:
+            # Get last 6-10 messages (sliding window)
+            recent_messages = context.conversation_history[-10:]  # Last 10 messages
+            
+            if len(recent_messages) > 0:
+                history_block = "\n\n【近期对话回顾 (Recent Conversation History)】\n"
+                history_block += "[重要提示: 以下是最近的对话历史，请仔细阅读以理解上下文和用户的引用（如'那个'、'之前的'等）]\n\n"
+                
+                for msg in recent_messages:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    
+                    # Format role name
+                    role_name = "用户" if role == "user" else "助手"
+                    
+                    # Truncate very long messages to save tokens
+                    if len(content) > 300:
+                        content = content[:300] + "..."
+                    
+                    history_block += f"{role_name}: {content}\n\n"
+                
+                history_block += "[重要提示: 上述对话历史帮助你理解当前消息的上下文。请基于历史对话回答用户的问题。]\n"
+                contextual_parts.append(history_block)
+        
+        # Add the user's actual message (with clear marker)
+        contextual_parts.append(f"\n【当前用户消息 (Current User Message)】\n{message}")
 
         # Add context about current stage
         if context.current_stage == "initial":

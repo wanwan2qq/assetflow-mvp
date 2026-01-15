@@ -70,7 +70,7 @@ git add backend/app/         # 添加特定目录
 git add specific-file.py     # 添加特定文件
 
 # 提交更改
-git commit -m "feat: 添加用户认证功能"
+git commit -m "feat: 添加记忆功能，中间版本，主体功能完成，待优化聊天逻辑"
 
 # 推送到远程分支
 git push origin feature/your-feature-name

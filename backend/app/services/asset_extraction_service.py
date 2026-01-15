@@ -328,7 +328,7 @@ class AssetExtractionService:
             return False
     
     async def _update_assets_from_extraction(self, user_id: int, assets_data: list, session: Session):
-        """L1 Update: Upsert assets to UserAsset table"""
+        """L1 Update: Upsert assets to UserAsset table with improved duplicate handling"""
         
         asset_type_mapping = {
             "real_estate": AssetType.REAL_ESTATE,
@@ -351,17 +351,17 @@ class AssetExtractionService:
                 if amount is None or amount <= 0:
                     amount = 1  # Use 1 as placeholder for assets without known value
                 name = asset_data.get("name", f"{asset_type_str}资产")
+                location = asset_data.get("location")
+                area = asset_data.get("area")
                 
-                # Check for existing asset of same type
-                existing_statement = select(UserAsset).where(
-                    UserAsset.user_id == user_id,
-                    UserAsset.asset_type == asset_type
+                # FIXED: Improved duplicate detection with fine-grained matching
+                existing_asset = await self._find_similar_asset(
+                    user_id, asset_type, name, location, area, session
                 )
-                existing_result = await session.execute(existing_statement)
-                existing_asset = existing_result.scalar_one_or_none()
                 
                 if existing_asset:
                     # Update existing asset
+                    logger.info(f"Found similar asset (id={existing_asset.id}), updating instead of creating new")
                     existing_asset.value = amount
                     existing_asset.name = name
                     
@@ -369,22 +369,23 @@ class AssetExtractionService:
                     if not existing_asset.extra_data:
                         existing_asset.extra_data = {}
                     
-                    if asset_data.get("location"):
-                        existing_asset.extra_data["location"] = asset_data["location"]
-                    if asset_data.get("area"):
-                        existing_asset.extra_data["area"] = asset_data["area"]
+                    if location:
+                        existing_asset.extra_data["location"] = location
+                    if area:
+                        existing_asset.extra_data["area"] = area
                     
                     existing_asset.extra_data["last_updated"] = datetime.now().isoformat()
+                    existing_asset.updated_at = datetime.now()
                     session.add(existing_asset)
                     logger.info(f"Updated existing asset: {name} = {amount}")
                     
                 else:
                     # Create new asset
                     extra_data = {}
-                    if asset_data.get("location"):
-                        extra_data["location"] = asset_data["location"]
-                    if asset_data.get("area"):
-                        extra_data["area"] = asset_data["area"]
+                    if location:
+                        extra_data["location"] = location
+                    if area:
+                        extra_data["area"] = area
                     extra_data["created_from_extraction"] = True
                     extra_data["extraction_timestamp"] = datetime.now().isoformat()
                     
@@ -404,8 +405,128 @@ class AssetExtractionService:
                 logger.error(f"Error processing asset {asset_data}: {e}")
                 continue
     
+    async def _find_similar_asset(
+        self, 
+        user_id: int, 
+        asset_type: AssetType, 
+        name: str,
+        location: str | None,
+        area: float | None,
+        session: Session
+    ) -> UserAsset | None:
+        """
+        Find similar existing asset with fine-grained matching logic.
+        
+        Matching strategy:
+        - For real estate: match by location OR area (within 10 sqm) OR name similarity
+        - For other types: match by name similarity (fuzzy match)
+        
+        Returns the most similar asset or None if no match found.
+        """
+        try:
+            # Query all assets of the same type for this user
+            statement = select(UserAsset).where(
+                UserAsset.user_id == user_id,
+                UserAsset.asset_type == asset_type
+            )
+            result = await session.execute(statement)
+            existing_assets = result.scalars().all()
+            
+            if not existing_assets:
+                return None
+            
+            # Special matching logic for real estate
+            if asset_type == AssetType.REAL_ESTATE:
+                for asset in existing_assets:
+                    asset_location = asset.extra_data.get("location") if asset.extra_data else None
+                    asset_area = asset.extra_data.get("area") if asset.extra_data else None
+                    
+                    # Match by location (exact or substring match)
+                    if location and asset_location:
+                        # Normalize locations for comparison
+                        location_normalized = location.replace(" ", "").lower()
+                        asset_location_normalized = asset_location.replace(" ", "").lower()
+                        
+                        if (location_normalized in asset_location_normalized or 
+                            asset_location_normalized in location_normalized):
+                            logger.info(f"Matched real estate by location: '{location}' ~ '{asset_location}'")
+                            return asset
+                    
+                    # Match by area (within 10 sqm tolerance)
+                    if area and asset_area:
+                        if abs(area - asset_area) < 10:
+                            logger.info(f"Matched real estate by area: {area} ~ {asset_area}")
+                            return asset
+                    
+                    # Match by name similarity
+                    if self._is_name_similar(name, asset.name):
+                        logger.info(f"Matched real estate by name: '{name}' ~ '{asset.name}'")
+                        return asset
+            
+            # For other asset types, match by name similarity
+            else:
+                for asset in existing_assets:
+                    if self._is_name_similar(name, asset.name):
+                        logger.info(f"Matched {asset_type.value} by name: '{name}' ~ '{asset.name}'")
+                        return asset
+            
+            # No match found
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error finding similar asset: {e}")
+            return None
+    
+    def _is_name_similar(self, name1: str, name2: str) -> bool:
+        """
+        Check if two asset names are similar.
+        
+        Strategy:
+        - Normalize: lowercase, remove spaces
+        - Check if one is substring of the other
+        - Or if they share significant common words
+        """
+        # Normalize names
+        n1 = name1.lower().replace(" ", "")
+        n2 = name2.lower().replace(" ", "")
+        
+        # Substring match
+        if n1 in n2 or n2 in n1:
+            return True
+        
+        # Word-based similarity (for Chinese and English)
+        # Split by common delimiters
+        import re
+        words1 = set(re.findall(r'[\w]+', name1.lower()))
+        words2 = set(re.findall(r'[\w]+', name2.lower()))
+        
+        # Remove very short words (likely not meaningful)
+        words1 = {w for w in words1 if len(w) > 1}
+        words2 = {w for w in words2 if len(w) > 1}
+        
+        if not words1 or not words2:
+            return False
+        
+        # Calculate Jaccard similarity
+        intersection = words1 & words2
+        union = words1 | words2
+        
+        if len(union) == 0:
+            return False
+        
+        similarity = len(intersection) / len(union)
+        
+        # Consider similar if >50% overlap
+        return similarity > 0.5
+    
     async def _update_cognition_from_extraction(self, user_id: int, extraction_result: dict, session: Session):
-        """L2 Update: Update UserCognition with goals, risk profile, and collection status"""
+        """
+        L2 Update: Update UserCognition with goals, risk profile, and collection status
+        
+        IMPORTANT: L2 layer stores AI's psychological analysis and decision-making data.
+        Basic profile fields (age_range, family_structure, etc.) are stored in L1 (UserProfile).
+        L2 only stores psychological traits and sentiment analysis.
+        """
         
         logger.info(f"Starting _update_cognition_from_extraction for user {user_id} with result: {extraction_result}")
         
@@ -431,18 +552,40 @@ class AssetExtractionService:
             
             logger.info(f"Updated financial goals for user {user_id}: {cognition.financial_goals}")
         
-        # Update risk profile
+        # FIXED: Update risk profile - ONLY store psychological analysis data
+        # Basic profile fields (age_range, family_structure, monthly_expense, occupation, income_range)
+        # are now stored in L1 (UserProfile) and should NOT be duplicated here
         risk_profile = extraction_result.get("risk_profile", {})
         if risk_profile:
             if not cognition.risk_profile:
                 cognition.risk_profile = {}
             
-            # Merge risk profile data
-            for key, value in risk_profile.items():
-                if value:  # Only update non-empty values
-                    cognition.risk_profile[key] = value
+            # ONLY store psychological/sentiment analysis fields in L2
+            psychological_fields = [
+                "tolerance",           # Risk tolerance (from extraction or analysis)
+                "decision_style",      # Decision making style (from Phase 3 analysis)
+                "confidence_level",    # User's confidence level (from Phase 3 analysis)
+                "current_sentiment",   # Current emotional state (from Phase 3 analysis)
+                "loss_aversion",       # Loss aversion level (from Phase 3 analysis)
+                "uncertainty_tolerance", # Uncertainty tolerance (from Phase 3 analysis)
+                "financial_literacy",  # Financial knowledge level (from Phase 3 analysis)
+                "family_responsibility", # Family responsibility sense (from Phase 3 analysis)
+                "planning_horizon",    # Planning time horizon (from Phase 3 analysis)
+                "last_analysis"        # Timestamp of last analysis
+            ]
             
-            logger.info(f"Updated risk profile for user {user_id}: {cognition.risk_profile}")
+            # Only update psychological fields, ignore basic profile fields
+            for key, value in risk_profile.items():
+                if key in psychological_fields and value:
+                    cognition.risk_profile[key] = value
+                elif key not in psychological_fields:
+                    # Log that we're skipping basic profile fields (they belong in L1)
+                    logger.debug(f"Skipping basic profile field '{key}' - belongs in L1 (UserProfile)")
+            
+            logger.info(f"Updated risk profile (L2 psychological data) for user {user_id}: {cognition.risk_profile}")
+        
+        # Also update UserProfile table with basic fields (L1 layer)
+        await self._update_user_profile_from_extraction(user_id, risk_profile, session)
         
         # Update collection status
         completeness_update = extraction_result.get("completeness_update", {})
@@ -479,6 +622,88 @@ class AssetExtractionService:
         cognition.updated_at = datetime.now()
         session.add(cognition)
         logger.info(f"Added cognition to session for user {user_id}")
+    
+    async def _update_user_profile_from_extraction(self, user_id: int, risk_profile: dict, session: Session):
+        """Update UserProfile table with basic profile fields (age_range, family_structure, monthly_expense, risk_preference, occupation, income_range)"""
+        
+        if not risk_profile:
+            return
+        
+        logger.info(f"Updating UserProfile for user {user_id} with risk_profile: {risk_profile}")
+        
+        # Get or create UserProfile record
+        profile_statement = select(UserProfile).where(UserProfile.user_id == user_id)
+        profile_result = await session.execute(profile_statement)
+        profile = profile_result.scalar_one_or_none()
+        
+        # Check if we have any fields to update
+        has_updates = False
+        
+        if not profile:
+            # FIXED: Create profile if we have ANY useful field (not just all required fields)
+            # Use sensible defaults for required fields if not provided
+            age_range = risk_profile.get("age_range")
+            family_structure = risk_profile.get("family_structure")
+            risk_preference = risk_profile.get("tolerance")
+            occupation = risk_profile.get("occupation")
+            income_range = risk_profile.get("income_range")
+            monthly_expense = risk_profile.get("monthly_expense")
+            
+            # Create profile if we have at least one meaningful field
+            if any([age_range, family_structure, risk_preference, occupation, income_range, monthly_expense]):
+                profile = UserProfile(
+                    user_id=user_id,
+                    age_range=age_range or "30-40",  # Default to common age range
+                    family_structure=family_structure or "single",  # Default to single
+                    risk_preference=risk_preference or "moderate",  # Default to moderate
+                    monthly_expense=monthly_expense,
+                    occupation=occupation,
+                    income_range=income_range
+                )
+                session.add(profile)
+                has_updates = True
+                logger.info(f"Created new UserProfile for user {user_id} with defaults for missing required fields")
+                logger.info(f"  - age_range: {profile.age_range} {'(default)' if not age_range else ''}")
+                logger.info(f"  - family_structure: {profile.family_structure} {'(default)' if not family_structure else ''}")
+                logger.info(f"  - risk_preference: {profile.risk_preference} {'(default)' if not risk_preference else ''}")
+                logger.info(f"  - occupation: {occupation}")
+                logger.info(f"  - income_range: {income_range}")
+            else:
+                logger.info(f"Skipping UserProfile creation - no useful fields provided")
+        else:
+            # Update existing profile fields (only update if new value provided)
+            if risk_profile.get("age_range"):
+                profile.age_range = risk_profile["age_range"]
+                has_updates = True
+            
+            if risk_profile.get("family_structure"):
+                profile.family_structure = risk_profile["family_structure"]
+                has_updates = True
+            
+            if risk_profile.get("tolerance"):
+                profile.risk_preference = risk_profile["tolerance"]
+                has_updates = True
+            
+            if risk_profile.get("monthly_expense") is not None:
+                profile.monthly_expense = risk_profile["monthly_expense"]
+                has_updates = True
+            
+            if risk_profile.get("occupation"):
+                profile.occupation = risk_profile["occupation"]
+                has_updates = True
+                logger.info(f"Updated occupation for user {user_id}: {profile.occupation}")
+            
+            if risk_profile.get("income_range"):
+                profile.income_range = risk_profile["income_range"]
+                has_updates = True
+                logger.info(f"Updated income_range for user {user_id}: {profile.income_range}")
+            
+            if has_updates:
+                session.add(profile)
+                logger.info(f"Updated UserProfile for user {user_id}")
+        
+        if has_updates:
+            logger.info(f"UserProfile changes will be committed for user {user_id}")
 
     async def get_extraction_summary(self, user_id: int) -> dict[str, Any]:
         """Get summary of extracted information for a user"""

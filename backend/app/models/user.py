@@ -55,6 +55,8 @@ class UserProfile(SQLModel, table=True):
     )  # "single", "married", "married_with_kids"
     risk_preference: RiskLevel
     monthly_expense: float | None = Field(default=None, ge=0)
+    occupation: str | None = Field(default=None, max_length=100)  # User's occupation
+    income_range: str | None = Field(default=None, max_length=50)  # Income range (e.g., "10-20万", "20-50万")
 
     # 关联关系
     user: User = Relationship(back_populates="profile")
@@ -90,7 +92,7 @@ class UserAsset(SQLModel, table=True):
     asset_type: AssetType
     name: str = Field(min_length=1, max_length=200)  # 资产名称，如"天通苑北一区"
     value: float = Field(gt=0)  # 资产价值，必须大于0
-    is_confirmed: bool = False  # 是否经用户确认
+    is_confirmed: bool = Field(default=False)  # 是否经用户确认 - tracks if data came from explicit user input
     extra_data: dict | None = Field(
         sa_type=JSON, default=None
     )  # 额外信息，如面积、位置等

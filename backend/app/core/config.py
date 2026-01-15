@@ -43,8 +43,8 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     USE_MOCK_SEARCH: bool = True  # Use mock search in development
 
-    # CORS
-    BACKEND_CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8080,http://localhost:8081"
+    # CORS - 支持局域网访问
+    BACKEND_CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8080,http://localhost:8081,http://10.36.234.5:8080,http://10.36.234.5:3000"
 
     def get_cors_origins(self) -> list[str]:
         """Get CORS origins as a list"""

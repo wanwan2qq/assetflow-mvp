@@ -1,15 +1,15 @@
 """
-Natural language information extraction for asset and user profile data
-Enhanced with LLM-based extraction for Phase 2 implementation
+LLM-based information extraction for asset and user profile data
+Refactored to use DeepSeek/OpenAI instead of brittle regex patterns
 """
 
 import json
 import logging
-import re
 from datetime import datetime
 from enum import Enum
 from typing import Any
 
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
@@ -56,474 +56,259 @@ class ExtractedUserProfile(BaseModel):
 
 
 class InformationExtractor:
-    """Natural language information extraction service"""
+    """LLM-based information extraction service"""
 
     def __init__(self):
-        # Property-related keywords and patterns
-        self.property_keywords = [
-            "房子",
-            "房产",
-            "住房",
-            "小区",
-            "楼盘",
-            "公寓",
-            "别墅",
-            "商铺",
-            "写字楼",
-            "房屋",
-            "物业",
-            "地产",
-        ]
+        """Initialize the LLM-based extractor"""
+        # Check if we have a valid OpenAI API key
+        self.has_real_openai_key = (
+            settings.OPENAI_API_KEY
+            and not settings.OPENAI_API_KEY.startswith("sk-mock")
+            and settings.OPENAI_API_KEY != "mock-key"
+        )
 
-        # Location patterns (major Chinese cities and districts)
-        self.location_patterns = [
-            # Major cities
-            "北京",
-            "上海",
-            "深圳",
-            "广州",
-            "杭州",
-            "南京",
-            "成都",
-            "武汉",
-            "西安",
-            "重庆",
-            "天津",
-            "苏州",
-            "青岛",
-            "长沙",
-            "大连",
-            "厦门",
-            # Beijing districts/areas
-            "朝阳",
-            "海淀",
-            "西城",
-            "东城",
-            "丰台",
-            "石景山",
-            "昌平",
-            "大兴",
-            "通州",
-            "顺义",
-            "房山",
-            "门头沟",
-            "平谷",
-            "怀柔",
-            "密云",
-            "延庆",
-            "天通苑",
-            "望京",
-            "中关村",
-            "三里屯",
-            "国贸",
-            "亚运村",
-            "回龙观",
-            # Shanghai districts/areas
-            "浦东",
-            "徐汇",
-            "长宁",
-            "静安",
-            "普陀",
-            "虹口",
-            "杨浦",
-            "黄浦",
-            "闵行",
-            "宝山",
-            "嘉定",
-            "金山",
-            "松江",
-            "青浦",
-            "奉贤",
-            "崇明",
-            "陆家嘴",
-            "徐家汇",
-            "静安寺",
-            "人民广场",
-            "外滩",
-            "新天地",
-        ]
+        if not self.has_real_openai_key:
+            logger.warning(
+                "No valid OpenAI API key - extraction will use fallback mode"
+            )
+            self.llm = None
+        else:
+            # Initialize LLM for extraction
+            llm_kwargs = {
+                "model": "deepseek-chat",
+                "temperature": 0.1,  # Low temperature for consistent extraction
+                "api_key": settings.OPENAI_API_KEY,
+            }
 
-        # Asset value patterns
-        self.value_patterns = [
-            r"(\d+(?:\.\d+)?)\s*万",  # X万, X.X万
-            r"(\d+(?:\.\d+)?)\s*千万",  # X千万
-            r"(\d+(?:\.\d+)?)\s*亿",  # X亿
-            r"(\d+(?:,\d{3})*(?:\.\d+)?)\s*元",  # X元, X,XXX元
-            r"(\d+(?:,\d{3})*(?:\.\d+)?)\s*块",  # X块钱
-        ]
+            if settings.OPENAI_API_BASE:
+                llm_kwargs["base_url"] = settings.OPENAI_API_BASE
 
-        # Area patterns
-        self.area_patterns = [
-            r"(\d+(?:\.\d+)?)\s*平(?:方米|米)?",  # X平, X平方米, X平米
-            r"(\d+(?:\.\d+)?)\s*㎡",  # X㎡
-            r"(\d+(?:\.\d+)?)\s*平方",  # X平方
-        ]
+            self.llm = ChatOpenAI(**llm_kwargs)
 
-        # Age range patterns
-        self.age_patterns = [
-            r"(\d{1,2})\s*岁",  # X岁
-            r"(\d{1,2})\s*-\s*(\d{1,2})\s*岁",  # X-Y岁
-            r"(\d{2})后",  # 80后, 90后
-        ]
+    async def extract_information_from_conversation(
+        self, text: str, conversation_history: list[dict] | None = None
+    ) -> tuple[list[ExtractedAsset], ExtractedUserProfile | None, dict[str, Any]]:
+        """
+        Extract structured information from conversational text using LLM
 
-        # Family structure keywords
-        self.family_keywords = {
-            "single": ["单身", "未婚", "一个人", "独居"],
-            "married": ["已婚", "结婚", "夫妻", "老公", "老婆", "丈夫", "妻子"],
-            "married_with_kids": [
-                "孩子",
-                "小孩",
-                "儿子",
-                "女儿",
-                "宝宝",
-                "家庭",
-                "三口之家",
-                "四口之家",
-            ],
-        }
+        Args:
+            text: User message to extract from
+            conversation_history: Optional conversation context
 
-        # Asset type keywords
-        self.asset_keywords = {
-            AssetType.REAL_ESTATE: self.property_keywords,
-            AssetType.CASH: [
-                "现金",
-                "存款",
-                "银行",
-                "储蓄",
-                "活期",
-                "定期",
-                "余额宝",
-                "理财通",
-            ],
-            AssetType.INVESTMENT: [
-                "股票",
-                "基金",
-                "债券",
-                "理财",
-                "投资",
-                "证券",
-                "期货",
-                "黄金",
-                "外汇",
-            ],
-            AssetType.INSURANCE: [
-                "保险",
-                "重疾险",
-                "意外险",
-                "寿险",
-                "医疗险",
-                "车险",
-                "财产险",
-            ],
-            AssetType.LIABILITY: [
-                "贷款",
-                "房贷",
-                "车贷",
-                "信用卡",
-                "欠款",
-                "债务",
-                "借款",
-                "按揭",
-            ],
-        }
+        Returns:
+            Tuple of (assets, user_profile, validation_result)
+        """
+        if not self.llm:
+            # Fallback to simple extraction when LLM is not available
+            return await self._fallback_extraction(text)
 
-    def extract_assets_from_text(self, text: str) -> list[ExtractedAsset]:
-        """Extract asset information from natural language text"""
+        try:
+            # Build extraction prompt
+            prompt = self._build_extraction_prompt(text, conversation_history or [])
+
+            # Get LLM response
+            response = await self.llm.ainvoke(prompt)
+
+            # Parse JSON response
+            try:
+                result = json.loads(response.content)
+                logger.info(f"LLM extraction successful: {result}")
+
+                # Convert to ExtractedAsset and ExtractedUserProfile objects
+                assets = self._parse_assets(result.get("assets", []), text)
+                profile = self._parse_profile(result.get("profile", {}), text)
+                intent = result.get("intent", "new_info")
+
+                # Create validation result
+                validation = self._create_validation(assets, profile, intent)
+
+                return assets, profile, validation
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse LLM response as JSON: {e}")
+                logger.error(f"Response content: {response.content}")
+                return await self._fallback_extraction(text)
+
+        except Exception as e:
+            logger.error(f"Error in LLM extraction: {e}")
+            return await self._fallback_extraction(text)
+
+    def _build_extraction_prompt(
+        self, user_message: str, conversation_history: list[dict]
+    ) -> str:
+        """Build the extraction prompt for the LLM"""
+
+        # Build conversation context
+        context_messages = []
+        for msg in conversation_history[-5:]:  # Last 5 messages for context
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            context_messages.append(f"{role}: {content}")
+
+        context_str = (
+            "\n".join(context_messages) if context_messages else "No previous context"
+        )
+
+        prompt = f"""You are an expert financial information extraction system. Extract structured information from user messages about their assets and profile.
+
+**CRITICAL INSTRUCTIONS:**
+1. You MUST respond with ONLY valid JSON - no explanations, no markdown, no extra text
+2. Be conservative - only extract information you are confident about
+3. Handle fuzzy numbers (e.g., "about 500k" -> 500000, "大概50万" -> 500000)
+4. Detect correction intent: if user says "No, it's..." or "不是，是..." set intent to "correction"
+
+**CONVERSATION CONTEXT:**
+{context_str}
+
+**CURRENT USER MESSAGE:**
+{user_message}
+
+**REQUIRED JSON OUTPUT FORMAT:**
+{{
+    "assets": [
+        {{
+            "type": "real_estate|cash|investment|insurance|liability",
+            "name": "资产名称",
+            "value": 500000,
+            "location": "位置(如适用)",
+            "area": 120.5,
+            "metadata": {{"key": "value"}}
+        }}
+    ],
+    "profile": {{
+        "age_range": "30-40",
+        "family_structure": "married_with_kids",
+        "monthly_expense": 15000,
+        "risk_preference": "conservative|moderate|aggressive",
+        "occupation": "职业",
+        "income_range": "收入范围"
+    }},
+    "intent": "new_info|correction"
+}}
+
+**EXTRACTION RULES:**
+
+1. **Assets Extraction:**
+   - Extract specific asset mentions with amounts
+   - For real estate: extract location, area (平方米), and value
+   - For cash: extract amount and account type if mentioned
+   - For investments: extract type (股票/基金/etc) and amount
+   - For insurance: extract type and coverage amount
+   - For liabilities: extract type (房贷/车贷/etc) and amount
+
+2. **Profile Extraction:**
+   - age_range: Extract from "X岁", "X-Y岁", "80后/90后" -> "30-40", "40-50", etc.
+   - family_structure: "single", "married", "married_with_kids", "divorced", "widowed"
+   - monthly_expense: Extract from "月支出", "每月花费", etc.
+   - risk_preference: "conservative" (保守/稳健), "moderate" (平衡), "aggressive" (激进/进取)
+   - occupation: Extract job title if mentioned
+   - income_range: Extract income information if mentioned
+
+3. **Intent Detection:**
+   - "new_info": User is providing new information
+   - "correction": User is correcting previous information (keywords: "不是", "不对", "应该是", "其实是", "No", "Actually")
+
+4. **Amount Conversion (Chinese):**
+   - "50万" -> 500000
+   - "100万" -> 1000000
+   - "1千万" -> 10000000
+   - "1亿" -> 100000000
+   - "about 500k" -> 500000
+   - "大概50万" -> 500000
+
+5. **Asset Type Mapping (Chinese):**
+   - 房产/房子/住房/小区/楼盘 -> "real_estate"
+   - 现金/存款/银行/储蓄 -> "cash"
+   - 股票/基金/投资/理财 -> "investment"
+   - 保险/重疾险/意外险 -> "insurance"
+   - 贷款/房贷/车贷/债务 -> "liability"
+
+**IMPORTANT:**
+- Only include fields with actual extracted data
+- If no assets found, return empty array
+- If no profile data found, return empty object
+- Always include "intent" field
+
+Respond with ONLY the JSON object:"""
+
+        return prompt
+
+    def _parse_assets(
+        self, assets_data: list[dict], extracted_from: str
+    ) -> list[ExtractedAsset]:
+        """Parse assets from LLM response"""
         assets = []
 
-        # Extract real estate assets
-        real_estate_assets = self._extract_real_estate(text)
-        assets.extend(real_estate_assets)
+        for asset_data in assets_data:
+            try:
+                asset_type = AssetType(asset_data.get("type", "cash"))
+                name = asset_data.get("name", f"{asset_type.value}资产")
+                value = asset_data.get("value")
+                location = asset_data.get("location")
+                area = asset_data.get("area")
+                metadata = asset_data.get("metadata", {})
 
-        # Extract other asset types
-        for asset_type, keywords in self.asset_keywords.items():
-            if asset_type == AssetType.REAL_ESTATE:
-                continue  # Already handled above
+                # Add location and area to metadata if present
+                if location:
+                    metadata["location"] = location
+                if area:
+                    metadata["area"] = area
 
-            asset_mentions = self._extract_asset_mentions(text, asset_type, keywords)
-            assets.extend(asset_mentions)
+                asset = ExtractedAsset(
+                    asset_type=asset_type,
+                    name=name,
+                    value=value,
+                    location=location,
+                    area=area,
+                    metadata=metadata,
+                    confidence=0.85,  # High confidence from LLM extraction
+                    extracted_from=extracted_from,
+                )
+                assets.append(asset)
+
+            except Exception as e:
+                logger.error(f"Error parsing asset: {e}, data: {asset_data}")
+                continue
 
         return assets
 
-    def extract_user_profile_from_text(self, text: str) -> ExtractedUserProfile | None:
-        """Extract user profile information from natural language text"""
-        profile_data = {}
-        confidence_scores = []
-
-        # Extract age information
-        age_info = self._extract_age_range(text)
-        if age_info:
-            profile_data["age_range"] = age_info["range"]
-            confidence_scores.append(age_info["confidence"])
-
-        # Extract family structure
-        family_info = self._extract_family_structure(text)
-        if family_info:
-            profile_data["family_structure"] = family_info["structure"]
-            confidence_scores.append(family_info["confidence"])
-
-        # Extract monthly expenses
-        expense_info = self._extract_monthly_expenses(text)
-        if expense_info:
-            profile_data["monthly_expense"] = expense_info["amount"]
-            confidence_scores.append(expense_info["confidence"])
-
-        # Extract risk preference
-        risk_info = self._extract_risk_preference(text)
-        if risk_info:
-            profile_data["risk_preference"] = risk_info["preference"]
-            confidence_scores.append(risk_info["confidence"])
-
-        if not profile_data:
+    def _parse_profile(
+        self, profile_data: dict, extracted_from: str
+    ) -> ExtractedUserProfile | None:
+        """Parse user profile from LLM response"""
+        if not profile_data or not any(profile_data.values()):
             return None
 
-        # Calculate overall confidence
-        overall_confidence = (
-            sum(confidence_scores) / len(confidence_scores)
-            if confidence_scores
-            else 0.0
-        )
-
-        return ExtractedUserProfile(
-            **profile_data, confidence=overall_confidence, extracted_from=text
-        )
-
-    def _extract_real_estate(self, text: str) -> list[ExtractedAsset]:
-        """Extract real estate information with location and area"""
-        assets = []
-
-        # Check if text mentions property
-        has_property = any(keyword in text for keyword in self.property_keywords)
-        if not has_property:
-            return assets
-
-        # Extract location
-        location = self._extract_location(text)
-
-        # Extract area
-        area = self._extract_area(text)
-
-        # Extract value
-        value = self._extract_value(text)
-
-        # Create asset if we have meaningful information
-        if location or area or value:
-            metadata = {}
-            if area:
-                metadata["area"] = area
-            if location:
-                metadata["location"] = location
-
-            # Generate asset name
-            name_parts = []
-            if location:
-                name_parts.append(location)
-            if area:
-                name_parts.append(f"{area}平米")
-            name = "房产" if not name_parts else " ".join(name_parts) + "房产"
-
-            # Calculate confidence based on available information
-            confidence = 0.3  # Base confidence for property mention
-            if location:
-                confidence += 0.3
-            if area:
-                confidence += 0.2
-            if value:
-                confidence += 0.2
-
-            asset = ExtractedAsset(
-                asset_type=AssetType.REAL_ESTATE,
-                name=name,
-                value=value,
-                location=location,
-                area=area,
-                metadata=metadata,
-                confidence=confidence,
-                extracted_from=text,
+        try:
+            profile = ExtractedUserProfile(
+                age_range=profile_data.get("age_range"),
+                family_structure=profile_data.get("family_structure"),
+                monthly_expense=profile_data.get("monthly_expense"),
+                risk_preference=profile_data.get("risk_preference"),
+                occupation=profile_data.get("occupation"),
+                income_range=profile_data.get("income_range"),
+                confidence=0.80,  # High confidence from LLM extraction
+                extracted_from=extracted_from,
             )
-            assets.append(asset)
+            return profile
 
-        return assets
+        except Exception as e:
+            logger.error(f"Error parsing profile: {e}, data: {profile_data}")
+            return None
 
-    def _extract_asset_mentions(
-        self, text: str, asset_type: AssetType, keywords: list[str]
-    ) -> list[ExtractedAsset]:
-        """Extract mentions of specific asset types"""
-        assets = []
-
-        # Check if text mentions this asset type
-        mentioned_keywords = [kw for kw in keywords if kw in text]
-        if not mentioned_keywords:
-            return assets
-
-        # Extract value associated with this asset type
-        value = self._extract_value_near_keywords(text, mentioned_keywords)
-
-        # Create asset entry
-        name = mentioned_keywords[0]  # Use first mentioned keyword as name
-        confidence = 0.5 if value else 0.3  # Higher confidence if value is found
-
-        asset = ExtractedAsset(
-            asset_type=asset_type,
-            name=name,
-            value=value,
-            confidence=confidence,
-            extracted_from=text,
-        )
-        assets.append(asset)
-
-        return assets
-
-    def _extract_location(self, text: str) -> str | None:
-        """Extract location information from text"""
-        for location in self.location_patterns:
-            if location in text:
-                return location
-        return None
-
-    def _extract_area(self, text: str) -> float | None:
-        """Extract area information from text"""
-        for pattern in self.area_patterns:
-            match = re.search(pattern, text)
-            if match:
-                try:
-                    return float(match.group(1))
-                except ValueError:
-                    continue
-        return None
-
-    def _extract_value(self, text: str) -> float | None:
-        """Extract monetary value from text"""
-        for pattern in self.value_patterns:
-            match = re.search(pattern, text)
-            if match:
-                try:
-                    value = float(match.group(1).replace(",", ""))
-
-                    # Convert based on unit
-                    if "万" in pattern:
-                        value *= 10000
-                    elif "千万" in pattern:
-                        value *= 10000000
-                    elif "亿" in pattern:
-                        value *= 100000000
-
-                    return value
-                except ValueError:
-                    continue
-        return None
-
-    def _extract_value_near_keywords(
-        self, text: str, keywords: list[str]
-    ) -> float | None:
-        """Extract value that appears near specific keywords"""
-        # Simple approach: look for values in the same sentence as keywords
-        sentences = re.split(r"[。！？；]", text)
-
-        for sentence in sentences:
-            # Check if sentence contains any of the keywords
-            if any(kw in sentence for kw in keywords):
-                value = self._extract_value(sentence)
-                if value:
-                    return value
-
-        return None
-
-    def _extract_age_range(self, text: str) -> dict[str, Any] | None:
-        """Extract age range information"""
-        for pattern in self.age_patterns:
-            match = re.search(pattern, text)
-            if match:
-                if len(match.groups()) == 1:
-                    # Single age or generation
-                    age_str = match.group(1)
-                    if "后" in match.group(0):  # 80后, 90后
-                        decade = int(age_str)
-                        return {"range": f"{decade}-{decade + 9}", "confidence": 0.8}
-                    else:  # X岁
-                        age = int(age_str)
-                        # Group into ranges
-                        if age < 30:
-                            range_str = "20-30"
-                        elif age < 40:
-                            range_str = "30-40"
-                        elif age < 50:
-                            range_str = "40-50"
-                        elif age < 60:
-                            range_str = "50-60"
-                        else:
-                            range_str = "60+"
-
-                        return {"range": range_str, "confidence": 0.9}
-                elif len(match.groups()) == 2:
-                    # Age range X-Y岁
-                    start_age = int(match.group(1))
-                    end_age = int(match.group(2))
-                    return {"range": f"{start_age}-{end_age}", "confidence": 0.9}
-
-        return None
-
-    def _extract_family_structure(self, text: str) -> dict[str, Any] | None:
-        """Extract family structure information"""
-        # Check for kids first (highest priority)
-        for keyword in self.family_keywords["married_with_kids"]:
-            if keyword in text:
-                return {"structure": "married_with_kids", "confidence": 0.8}
-
-        # Check for married
-        for keyword in self.family_keywords["married"]:
-            if keyword in text:
-                return {"structure": "married", "confidence": 0.7}
-
-        # Check for single
-        for keyword in self.family_keywords["single"]:
-            if keyword in text:
-                return {"structure": "single", "confidence": 0.7}
-
-        return None
-
-    def _extract_monthly_expenses(self, text: str) -> dict[str, Any] | None:
-        """Extract monthly expense information"""
-        expense_keywords = ["月支出", "每月花费", "月开销", "生活费", "月消费"]
-
-        # Look for expense-related patterns
-        for keyword in expense_keywords:
-            if keyword in text:
-                # Look for value near the keyword
-                # Simple approach: extract value from same sentence
-                sentences = re.split(r"[。！？；]", text)
-                for sentence in sentences:
-                    if keyword in sentence:
-                        value = self._extract_value(sentence)
-                        if value:
-                            return {"amount": value, "confidence": 0.7}
-
-        return None
-
-    def _extract_risk_preference(self, text: str) -> dict[str, Any] | None:
-        """Extract risk preference information"""
-        risk_keywords = {
-            "conservative": ["保守", "稳健", "安全", "低风险", "保本"],
-            "moderate": ["平衡", "中等", "适中", "稳中求进"],
-            "aggressive": ["激进", "高风险", "高收益", "冒险", "进取"],
-        }
-
-        for preference, keywords in risk_keywords.items():
-            for keyword in keywords:
-                if keyword in text:
-                    return {"preference": preference, "confidence": 0.6}
-
-        return None
-
-    def validate_extracted_data(
-        self, assets: list[ExtractedAsset], profile: ExtractedUserProfile | None
+    def _create_validation(
+        self,
+        assets: list[ExtractedAsset],
+        profile: ExtractedUserProfile | None,
+        intent: str,
     ) -> dict[str, Any]:
-        """Validate and provide feedback on extracted data quality"""
+        """Create validation result"""
         validation_result = {
             "is_valid": True,
             "warnings": [],
             "suggestions": [],
             "completeness_score": 0.0,
+            "intent": intent,
         }
 
         # Validate assets
@@ -577,6 +362,75 @@ class InformationExtractor:
 
         return validation_result
 
+    async def _fallback_extraction(
+        self, text: str
+    ) -> tuple[list[ExtractedAsset], ExtractedUserProfile | None, dict[str, Any]]:
+        """Fallback extraction using simple keyword matching when LLM is not available"""
+        logger.info("Using fallback extraction (no LLM available)")
+
+        assets = []
+        profile_data = {}
+
+        # Simple keyword-based extraction for development/testing
+        text_lower = text.lower()
+
+        # Extract real estate mentions
+        if any(
+            keyword in text
+            for keyword in ["房产", "房子", "住房", "小区", "楼盘", "公寓"]
+        ):
+            assets.append(
+                ExtractedAsset(
+                    asset_type=AssetType.REAL_ESTATE,
+                    name="房产",
+                    value=None,
+                    confidence=0.3,
+                    extracted_from=text,
+                )
+            )
+
+        # Extract cash mentions
+        if any(keyword in text for keyword in ["现金", "存款", "银行", "储蓄"]):
+            assets.append(
+                ExtractedAsset(
+                    asset_type=AssetType.CASH,
+                    name="现金",
+                    value=None,
+                    confidence=0.3,
+                    extracted_from=text,
+                )
+            )
+
+        # Extract investment mentions
+        if any(keyword in text for keyword in ["股票", "基金", "投资", "理财"]):
+            assets.append(
+                ExtractedAsset(
+                    asset_type=AssetType.INVESTMENT,
+                    name="投资",
+                    value=None,
+                    confidence=0.3,
+                    extracted_from=text,
+                )
+            )
+
+        # Simple profile extraction
+        if any(keyword in text for keyword in ["保守", "稳健", "安全"]):
+            profile_data["risk_preference"] = "conservative"
+        elif any(keyword in text for keyword in ["激进", "高风险", "进取"]):
+            profile_data["risk_preference"] = "aggressive"
+
+        profile = (
+            ExtractedUserProfile(
+                **profile_data, confidence=0.3, extracted_from=text
+            )
+            if profile_data
+            else None
+        )
+
+        validation = self._create_validation(assets, profile, "new_info")
+
+        return assets, profile, validation
+
 
 # Global extractor instance
 information_extractor = InformationExtractor()
@@ -586,197 +440,121 @@ def extract_information_from_conversation(
     text: str,
 ) -> tuple[list[ExtractedAsset], ExtractedUserProfile | None, dict[str, Any]]:
     """
+    Synchronous wrapper for backward compatibility
     Extract structured information from conversational text
 
     Returns:
         Tuple of (assets, user_profile, validation_result)
     """
-    assets = information_extractor.extract_assets_from_text(text)
-    profile = information_extractor.extract_user_profile_from_text(text)
-    validation = information_extractor.validate_extracted_data(assets, profile)
+    import asyncio
 
-    return assets, profile, validation
+    # Check if we're already in an async context
+    try:
+        loop = asyncio.get_running_loop()
+        # We're in an async context, create a new thread to run the async code
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                asyncio.run,
+                information_extractor.extract_information_from_conversation(text)
+            )
+            return future.result()
+    except RuntimeError:
+        # No running loop, we can use run_until_complete
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        return loop.run_until_complete(
+            information_extractor.extract_information_from_conversation(text)
+        )
 
 
 async def extract_information(user_message: str, current_history: list) -> dict:
     """
     Phase 2: LLM-based information extraction for automatic state sync.
-    
+
     Args:
         user_message: The user's current message
         current_history: List of previous conversation messages
-        
+
     Returns:
         dict: Structured extraction result with assets, goals, risk_profile, and completeness_update
     """
     try:
-        # Check if we have a valid OpenAI API key
-        if not settings.OPENAI_API_KEY or settings.OPENAI_API_KEY.startswith("sk-mock"):
-            logger.warning("No valid OpenAI API key - using fallback extraction")
-            return await _fallback_extraction(user_message)
-        
-        # Use LLM for structured extraction
-        from langchain_openai import ChatOpenAI
-        
-        llm_kwargs = {
-            "model": "deepseek-chat",
-            "temperature": 0.1,  # Low temperature for consistent extraction
-            "api_key": settings.OPENAI_API_KEY,
+        # Use the new LLM-based extractor
+        assets, profile, validation = await information_extractor.extract_information_from_conversation(
+            user_message, current_history
+        )
+
+        # Convert to Phase 2 format
+        result = {
+            "assets": [],
+            "goals": [],
+            "risk_profile": {},
+            "completeness_update": {},
+            "intent": validation.get("intent", "new_info"),
         }
-        
-        if settings.OPENAI_API_BASE:
-            llm_kwargs["base_url"] = settings.OPENAI_API_BASE
-            
-        llm = ChatOpenAI(**llm_kwargs)
-        
-        # Create extraction prompt
-        extraction_prompt = _create_extraction_prompt(user_message, current_history)
-        
-        # Get LLM response
-        response = await llm.ainvoke(extraction_prompt)
-        
-        # Parse JSON response
-        try:
-            result = json.loads(response.content)
-            logger.info(f"LLM extraction successful: {result}")
-            return result
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM response as JSON: {e}")
-            return await _fallback_extraction(user_message)
-            
+
+        # Convert assets
+        for asset in assets:
+            asset_data = {
+                "type": asset.asset_type.value,
+                "amount": asset.value or 0,
+                "currency": "CNY",
+                "name": asset.name,
+            }
+
+            if asset.location:
+                asset_data["location"] = asset.location
+            if asset.area:
+                asset_data["area"] = asset.area
+            if asset.metadata:
+                asset_data["metadata"] = asset.metadata
+
+            result["assets"].append(asset_data)
+
+            # Mark completeness
+            result["completeness_update"][asset.asset_type.value] = True
+
+        # Convert profile - FIXED: Include ALL profile fields
+        if profile:
+            if profile.risk_preference:
+                result["risk_profile"]["tolerance"] = profile.risk_preference
+            if profile.age_range:
+                result["risk_profile"]["age_range"] = profile.age_range
+            if profile.family_structure:
+                result["risk_profile"]["family_structure"] = profile.family_structure
+            if profile.monthly_expense:
+                result["risk_profile"]["monthly_expense"] = profile.monthly_expense
+            # FIXED: Add occupation and income_range to risk_profile
+            if profile.occupation:
+                result["risk_profile"]["occupation"] = profile.occupation
+            if profile.income_range:
+                result["risk_profile"]["income_range"] = profile.income_range
+
+            # Extract goals from profile (simple heuristics)
+            if profile.age_range:
+                age_start = int(profile.age_range.split("-")[0]) if "-" in profile.age_range else 30
+                if age_start < 35:
+                    result["goals"].append("buy_house")
+                if age_start > 40:
+                    result["goals"].append("retirement")
+            if profile.family_structure == "married_with_kids":
+                result["goals"].append("education")
+
+        logger.info(f"LLM extraction result: {result}")
+        return result
+
     except Exception as e:
-        logger.error(f"Error in LLM extraction: {e}")
-        return await _fallback_extraction(user_message)
-
-
-def _create_extraction_prompt(user_message: str, current_history: list) -> str:
-    """Create system prompt for LLM-based information extraction"""
-    
-    # Build conversation context
-    context_messages = []
-    for msg in current_history[-5:]:  # Last 5 messages for context
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        context_messages.append(f"{role}: {content}")
-    
-    context_str = "\n".join(context_messages) if context_messages else "No previous context"
-    
-    prompt = f"""You are an expert financial information extraction system. Your task is to extract structured information from user messages about their assets, goals, and risk profile.
-
-**CRITICAL INSTRUCTIONS:**
-1. You MUST respond with ONLY valid JSON - no explanations, no markdown, no extra text
-2. Be conservative - only extract information you are confident about
-3. Handle fuzzy numbers (e.g., "about 500k" -> 500000)
-4. Focus on NEW information in the current message
-
-**CONVERSATION CONTEXT:**
-{context_str}
-
-**CURRENT USER MESSAGE:**
-{user_message}
-
-**REQUIRED JSON OUTPUT FORMAT:**
-{{
-    "assets": [
-        {{
-            "type": "cash|real_estate|investment|insurance|liability",
-            "amount": 500000,
-            "currency": "CNY",
-            "name": "具体资产名称",
-            "location": "位置信息(如适用)",
-            "area": 120.5
-        }}
-    ],
-    "goals": ["buy_house", "retirement", "education", "travel"],
-    "risk_profile": {{
-        "tolerance": "low|medium|high",
-        "experience": "beginner|intermediate|advanced",
-        "anxiety": "low|medium|high"
-    }},
-    "completeness_update": {{
-        "cash": true
-    }}
-}}
-
-**EXTRACTION RULES:**
-- assets: Extract specific asset mentions with amounts
-- goals: Extract financial goals mentioned (buy_house, retirement, education, etc.)
-- risk_profile: Extract risk tolerance indicators
-- completeness_update: ONLY include asset types that are mentioned in the current message. Do NOT include asset types that are not mentioned.
-
-**CRITICAL FOR completeness_update:**
-- If user mentions cash, ONLY include "cash": true
-- If user mentions real estate, ONLY include "real_estate": true  
-- Do NOT include other asset types unless explicitly mentioned
-- NEVER set any asset type to false - omit it entirely if not mentioned
-
-**AMOUNT CONVERSION:**
-- "50万" -> 500000
-- "100万" -> 1000000  
-- "1千万" -> 10000000
-- "1亿" -> 100000000
-
-**ASSET TYPE MAPPING:**
-- 房产/房子/住房 -> "real_estate"
-- 现金/存款/银行 -> "cash"
-- 股票/基金/投资 -> "investment"
-- 保险 -> "insurance"
-- 贷款/房贷/债务 -> "liability"
-
-Respond with ONLY the JSON object:"""
-
-    return prompt
-
-
-async def _fallback_extraction(user_message: str) -> dict:
-    """Fallback extraction using rule-based approach when LLM is not available"""
-    
-    # Use existing rule-based extraction
-    assets, profile, validation = extract_information_from_conversation(user_message)
-    
-    # Convert to Phase 2 format
-    result = {
-        "assets": [],
-        "goals": [],
-        "risk_profile": {},
-        "completeness_update": {}
-    }
-    
-    # Convert assets
-    for asset in assets:
-        asset_data = {
-            "type": asset.asset_type.value,
-            "amount": asset.value or 0,
-            "currency": "CNY",
-            "name": asset.name
+        logger.error(f"Error in extract_information: {e}")
+        # Return empty result on error
+        return {
+            "assets": [],
+            "goals": [],
+            "risk_profile": {},
+            "completeness_update": {},
+            "intent": "new_info",
         }
-        
-        if asset.location:
-            asset_data["location"] = asset.location
-        if asset.area:
-            asset_data["area"] = asset.area
-            
-        result["assets"].append(asset_data)
-        
-        # Mark completeness
-        result["completeness_update"][asset.asset_type.value] = True
-    
-    # Convert profile
-    if profile:
-        if profile.risk_preference:
-            result["risk_profile"]["tolerance"] = profile.risk_preference
-        
-        # Extract goals from text (simple keyword matching)
-        goal_keywords = {
-            "buy_house": ["买房", "购房", "房子"],
-            "retirement": ["退休", "养老"],
-            "education": ["教育", "学费", "孩子上学"],
-            "travel": ["旅游", "旅行"]
-        }
-        
-        for goal, keywords in goal_keywords.items():
-            if any(keyword in user_message for keyword in keywords):
-                result["goals"].append(goal)
-    
-    logger.info(f"Fallback extraction result: {result}")
-    return result
