@@ -1,6 +1,7 @@
 """
 LLM-based information extraction for asset and user profile data
-Refactored to use DeepSeek/OpenAI instead of brittle regex patterns
+Refactored to use modular prompts and configuration-driven approach
+Enhanced with Standard & Poor's 4-quadrant model support
 """
 
 import json
@@ -56,7 +57,7 @@ class ExtractedUserProfile(BaseModel):
 
 
 class InformationExtractor:
-    """LLM-based information extraction service"""
+    """LLM-based information extraction service with modular prompt architecture"""
 
     def __init__(self):
         """Initialize the LLM-based extractor"""
@@ -89,7 +90,7 @@ class InformationExtractor:
         self, text: str, conversation_history: list[dict] | None = None
     ) -> tuple[list[ExtractedAsset], ExtractedUserProfile | None, dict[str, Any]]:
         """
-        Extract structured information from conversational text using LLM
+        Extract structured information from conversational text using modular LLM prompts
 
         Args:
             text: User message to extract from
@@ -103,141 +104,276 @@ class InformationExtractor:
             return await self._fallback_extraction(text)
 
         try:
-            # Build extraction prompt
-            prompt = self._build_extraction_prompt(text, conversation_history or [])
+            # Extract assets, profile, and intent in parallel using specialized prompts
+            assets = await self._extract_assets(text, conversation_history or [])
+            profile = await self._extract_profile(text, conversation_history or [])
+            intent_data = await self._detect_intent(text, conversation_history or [])
 
-            # Get LLM response
-            response = await self.llm.ainvoke(prompt)
+            # Create validation result
+            validation = self._create_validation(assets, profile, intent_data.get("primary_intent", "new_info"))
 
-            # Parse JSON response
-            try:
-                result = json.loads(response.content)
-                logger.info(f"LLM extraction successful: {result}")
-
-                # Convert to ExtractedAsset and ExtractedUserProfile objects
-                assets = self._parse_assets(result.get("assets", []), text)
-                profile = self._parse_profile(result.get("profile", {}), text)
-                intent = result.get("intent", "new_info")
-
-                # Create validation result
-                validation = self._create_validation(assets, profile, intent)
-
-                return assets, profile, validation
-
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse LLM response as JSON: {e}")
-                logger.error(f"Response content: {response.content}")
-                return await self._fallback_extraction(text)
+            return assets, profile, validation
 
         except Exception as e:
-            logger.error(f"Error in LLM extraction: {e}")
+            logger.error(f"Error in modular LLM extraction: {e}")
             return await self._fallback_extraction(text)
 
-    def _build_extraction_prompt(
+    async def _extract_assets(
+        self, user_message: str, conversation_history: list[dict]
+    ) -> list[ExtractedAsset]:
+        """Extract assets using specialized asset extraction prompt with enhanced error handling"""
+        try:
+            prompt = self._build_asset_extraction_prompt(user_message, conversation_history)
+            response = await self.llm.ainvoke(prompt)
+            
+            # Enhanced response validation
+            if not response or not response.content:
+                logger.warning("Asset extraction: Empty response from LLM")
+                return []
+            
+            response_content = response.content.strip()
+            if not response_content:
+                logger.warning("Asset extraction: Empty content after strip")
+                return []
+            
+            # Try to clean up response if it contains markdown code blocks
+            if "```json" in response_content:
+                json_start = response_content.find("```json") + 7
+                json_end = response_content.find("```", json_start)
+                if json_end > json_start:
+                    response_content = response_content[json_start:json_end].strip()
+            elif "```" in response_content:
+                json_start = response_content.find("```") + 3
+                json_end = response_content.find("```", json_start)
+                if json_end > json_start:
+                    response_content = response_content[json_start:json_end].strip()
+            
+            # Parse JSON with better error handling
+            try:
+                result = json.loads(response_content)
+            except json.JSONDecodeError as json_err:
+                logger.error(f"Asset extraction JSON parse error: {json_err}")
+                logger.error(f"Raw response content: {response_content[:200]}...")
+                
+                # Fallback: try to extract assets using regex patterns
+                logger.info("Attempting fallback asset extraction using regex patterns")
+                return self._fallback_asset_extraction(user_message)
+            
+            assets = self._parse_assets(result.get("assets", []), user_message)
+            
+            logger.info(f"Asset extraction successful: {len(assets)} assets found")
+            return assets
+            
+        except Exception as e:
+            logger.error(f"Error in asset extraction: {e}")
+            logger.error(f"Attempting fallback asset extraction")
+            return self._fallback_asset_extraction(user_message)
+
+    async def _extract_profile(
+        self, user_message: str, conversation_history: list[dict]
+    ) -> ExtractedUserProfile | None:
+        """Extract user profile using specialized profile extraction prompt with enhanced error handling"""
+        try:
+            prompt = self._build_profile_extraction_prompt(user_message, conversation_history)
+            response = await self.llm.ainvoke(prompt)
+            
+            # Enhanced response validation
+            if not response or not response.content:
+                logger.warning("Profile extraction: Empty response from LLM")
+                return None
+            
+            response_content = response.content.strip()
+            if not response_content:
+                logger.warning("Profile extraction: Empty content after strip")
+                return None
+            
+            # Try to clean up response if it contains markdown code blocks
+            if "```json" in response_content:
+                json_start = response_content.find("```json") + 7
+                json_end = response_content.find("```", json_start)
+                if json_end > json_start:
+                    response_content = response_content[json_start:json_end].strip()
+            elif "```" in response_content:
+                json_start = response_content.find("```") + 3
+                json_end = response_content.find("```", json_start)
+                if json_end > json_start:
+                    response_content = response_content[json_start:json_end].strip()
+            
+            # Parse JSON with better error handling
+            try:
+                result = json.loads(response_content)
+            except json.JSONDecodeError as json_err:
+                logger.error(f"Profile extraction JSON parse error: {json_err}")
+                logger.error(f"Raw response content: {response_content[:200]}...")
+                
+                # Fallback: try to extract profile using regex patterns
+                logger.info("Attempting fallback profile extraction using regex patterns")
+                return self._fallback_profile_extraction(user_message)
+            
+            profile = self._parse_profile(result.get("profile", {}), user_message)
+            
+            logger.info(f"Profile extraction successful: {profile is not None}")
+            return profile
+            
+        except Exception as e:
+            logger.error(f"Error in profile extraction: {e}")
+            logger.error(f"Attempting fallback profile extraction")
+            return self._fallback_profile_extraction(user_message)
+
+    async def _detect_intent(
+        self, user_message: str, conversation_history: list[dict]
+    ) -> dict[str, Any]:
+        """Detect user intent using specialized intent detection prompt with enhanced error handling"""
+        try:
+            prompt = self._build_intent_detection_prompt(user_message, conversation_history)
+            response = await self.llm.ainvoke(prompt)
+            
+            # Enhanced response validation
+            if not response or not response.content:
+                logger.warning("Intent detection: Empty response from LLM")
+                return {"primary_intent": "new_info", "confidence": 0.5}
+            
+            response_content = response.content.strip()
+            if not response_content:
+                logger.warning("Intent detection: Empty content after strip")
+                return {"primary_intent": "new_info", "confidence": 0.5}
+            
+            # Try to clean up response if it contains markdown code blocks
+            if "```json" in response_content:
+                json_start = response_content.find("```json") + 7
+                json_end = response_content.find("```", json_start)
+                if json_end > json_start:
+                    response_content = response_content[json_start:json_end].strip()
+            elif "```" in response_content:
+                json_start = response_content.find("```") + 3
+                json_end = response_content.find("```", json_start)
+                if json_end > json_start:
+                    response_content = response_content[json_start:json_end].strip()
+            
+            # Parse JSON with better error handling
+            try:
+                result = json.loads(response_content)
+            except json.JSONDecodeError as json_err:
+                logger.error(f"Intent detection JSON parse error: {json_err}")
+                logger.error(f"Raw response content: {response_content[:200]}...")
+                
+                # Fallback: simple intent detection
+                return self._fallback_intent_detection(user_message)
+            
+            intent_data = result.get("intent", {})
+            
+            logger.info(f"Intent detection successful: {intent_data.get('primary_intent', 'unknown')}")
+            return intent_data
+            
+        except Exception as e:
+            logger.error(f"Error in intent detection: {e}")
+            return self._fallback_intent_detection(user_message)
+
+    def _build_asset_extraction_prompt(
         self, user_message: str, conversation_history: list[dict]
     ) -> str:
-        """Build the extraction prompt for the LLM"""
+        """Build the asset extraction prompt"""
+        from app.core.prompt_manager import prompt_manager
 
         # Build conversation context
+        context_str = self._build_context_string(conversation_history)
+
+        # Load system instruction from modular prompt
+        system_instruction = prompt_manager.render(
+            category="extraction",
+            filename="asset_extraction",
+            key="system_instruction"
+        )
+
+        # Load and render user instruction with variables
+        user_instruction = prompt_manager.render(
+            category="extraction",
+            filename="asset_extraction",
+            key="user_instruction",
+            context_str=context_str,
+            user_message=user_message
+        )
+
+        return f"{system_instruction}\n\n{user_instruction}"
+
+    def _build_profile_extraction_prompt(
+        self, user_message: str, conversation_history: list[dict]
+    ) -> str:
+        """Build the profile extraction prompt"""
+        from app.core.prompt_manager import prompt_manager
+
+        # Build conversation context
+        context_str = self._build_context_string(conversation_history)
+
+        # Load system instruction from modular prompt
+        system_instruction = prompt_manager.render(
+            category="extraction",
+            filename="profile_extraction",
+            key="system_instruction"
+        )
+
+        # Load and render user instruction with variables
+        user_instruction = prompt_manager.render(
+            category="extraction",
+            filename="profile_extraction",
+            key="user_instruction",
+            context_str=context_str,
+            user_message=user_message
+        )
+
+        return f"{system_instruction}\n\n{user_instruction}"
+
+    def _build_intent_detection_prompt(
+        self, user_message: str, conversation_history: list[dict]
+    ) -> str:
+        """Build the intent detection prompt"""
+        from app.core.prompt_manager import prompt_manager
+
+        # Build conversation context
+        context_str = self._build_context_string(conversation_history)
+
+        # Load system instruction from modular prompt
+        system_instruction = prompt_manager.render(
+            category="extraction",
+            filename="intent_detection",
+            key="system_instruction"
+        )
+
+        # Load and render user instruction with variables
+        user_instruction = prompt_manager.render(
+            category="extraction",
+            filename="intent_detection",
+            key="user_instruction",
+            context_str=context_str,
+            user_message=user_message
+        )
+
+        return f"{system_instruction}\n\n{user_instruction}"
+
+    def _build_context_string(self, conversation_history: list[dict]) -> str:
+        """Build conversation context string from history"""
         context_messages = []
         for msg in conversation_history[-5:]:  # Last 5 messages for context
             role = msg.get("role", "user")
             content = msg.get("content", "")
             context_messages.append(f"{role}: {content}")
 
-        context_str = (
-            "\n".join(context_messages) if context_messages else "No previous context"
-        )
-
-        prompt = f"""You are an expert financial information extraction system. Extract structured information from user messages about their assets and profile.
-
-**CRITICAL INSTRUCTIONS:**
-1. You MUST respond with ONLY valid JSON - no explanations, no markdown, no extra text
-2. Be conservative - only extract information you are confident about
-3. Handle fuzzy numbers (e.g., "about 500k" -> 500000, "大概50万" -> 500000)
-4. Detect correction intent: if user says "No, it's..." or "不是，是..." set intent to "correction"
-
-**CONVERSATION CONTEXT:**
-{context_str}
-
-**CURRENT USER MESSAGE:**
-{user_message}
-
-**REQUIRED JSON OUTPUT FORMAT:**
-{{
-    "assets": [
-        {{
-            "type": "real_estate|cash|investment|insurance|liability",
-            "name": "资产名称",
-            "value": 500000,
-            "location": "位置(如适用)",
-            "area": 120.5,
-            "metadata": {{"key": "value"}}
-        }}
-    ],
-    "profile": {{
-        "age_range": "30-40",
-        "family_structure": "married_with_kids",
-        "monthly_expense": 15000,
-        "risk_preference": "conservative|moderate|aggressive",
-        "occupation": "职业",
-        "income_range": "收入范围"
-    }},
-    "intent": "new_info|correction"
-}}
-
-**EXTRACTION RULES:**
-
-1. **Assets Extraction:**
-   - Extract specific asset mentions with amounts
-   - For real estate: extract location, area (平方米), and value
-   - For cash: extract amount and account type if mentioned
-   - For investments: extract type (股票/基金/etc) and amount
-   - For insurance: extract type and coverage amount
-   - For liabilities: extract type (房贷/车贷/etc) and amount
-
-2. **Profile Extraction:**
-   - age_range: Extract from "X岁", "X-Y岁", "80后/90后" -> "30-40", "40-50", etc.
-   - family_structure: "single", "married", "married_with_kids", "divorced", "widowed"
-   - monthly_expense: Extract from "月支出", "每月花费", etc.
-   - risk_preference: "conservative" (保守/稳健), "moderate" (平衡), "aggressive" (激进/进取)
-   - occupation: Extract job title if mentioned
-   - income_range: Extract income information if mentioned
-
-3. **Intent Detection:**
-   - "new_info": User is providing new information
-   - "correction": User is correcting previous information (keywords: "不是", "不对", "应该是", "其实是", "No", "Actually")
-
-4. **Amount Conversion (Chinese):**
-   - "50万" -> 500000
-   - "100万" -> 1000000
-   - "1千万" -> 10000000
-   - "1亿" -> 100000000
-   - "about 500k" -> 500000
-   - "大概50万" -> 500000
-
-5. **Asset Type Mapping (Chinese):**
-   - 房产/房子/住房/小区/楼盘 -> "real_estate"
-   - 现金/存款/银行/储蓄 -> "cash"
-   - 股票/基金/投资/理财 -> "investment"
-   - 保险/重疾险/意外险 -> "insurance"
-   - 贷款/房贷/车贷/债务 -> "liability"
-
-**IMPORTANT:**
-- Only include fields with actual extracted data
-- If no assets found, return empty array
-- If no profile data found, return empty object
-- Always include "intent" field
-
-Respond with ONLY the JSON object:"""
-
-        return prompt
+        return "\n".join(context_messages) if context_messages else "No previous context"
 
     def _parse_assets(
         self, assets_data: list[dict], extracted_from: str
     ) -> list[ExtractedAsset]:
-        """Parse assets from LLM response"""
+        """Parse assets from LLM response with enhanced SP quadrant support"""
+        from app.core.prompt_manager import prompt_manager
+        
         assets = []
+        
+        # Load SP quadrant configuration for enhanced parsing
+        try:
+            sp_config = prompt_manager.get_sp_quadrant_config()
+        except Exception as e:
+            logger.warning(f"Could not load SP quadrant config: {e}")
+            sp_config = {}
 
         for asset_data in assets_data:
             try:
@@ -247,6 +383,16 @@ Respond with ONLY the JSON object:"""
                 location = asset_data.get("location")
                 area = asset_data.get("area")
                 metadata = asset_data.get("metadata", {})
+
+                # Enhanced metadata processing with SP quadrant classification
+                if asset_type == AssetType.INVESTMENT:
+                    subtype = metadata.get("subtype")
+                    risk_level = metadata.get("risk_level")
+                    
+                    # Classify into SP quadrant if possible
+                    quadrant = self._classify_sp_quadrant(subtype, risk_level, sp_config)
+                    if quadrant:
+                        metadata["sp_quadrant"] = quadrant
 
                 # Add location and area to metadata if present
                 if location:
@@ -271,6 +417,25 @@ Respond with ONLY the JSON object:"""
                 continue
 
         return assets
+
+    def _classify_sp_quadrant(
+        self, subtype: str, risk_level: str, sp_config: dict
+    ) -> str | None:
+        """Classify asset into Standard & Poor's 4-quadrant model"""
+        if not subtype or not risk_level or not sp_config:
+            return None
+        
+        quadrants = sp_config.get("quadrants", {})
+        
+        # Check each quadrant for matching asset types
+        for quadrant_name, quadrant_data in quadrants.items():
+            asset_types = quadrant_data.get("asset_types", [])
+            for asset_type in asset_types:
+                if (asset_type.get("subtype") == subtype and 
+                    asset_type.get("risk_level") == risk_level):
+                    return quadrant_name
+        
+        return None
 
     def _parse_profile(
         self, profile_data: dict, extracted_from: str
@@ -413,23 +578,283 @@ Respond with ONLY the JSON object:"""
                 )
             )
 
-        # Simple profile extraction
-        if any(keyword in text for keyword in ["保守", "稳健", "安全"]):
-            profile_data["risk_preference"] = "conservative"
-        elif any(keyword in text for keyword in ["激进", "高风险", "进取"]):
-            profile_data["risk_preference"] = "aggressive"
+        # Enhanced profile extraction for fallback mode
+        logger.info("Extracting user profile information in fallback mode")
+        
+        # Age range extraction
+        import re
+        age_patterns = [
+            (r'(\d{2})\s*岁', lambda m: self._map_age_to_range(int(m.group(1)))),
+            (r'今年\s*(\d{2})', lambda m: self._map_age_to_range(int(m.group(1)))),
+            (r'(\d{2})\s*年', lambda m: self._map_age_to_range(int(m.group(1)))),
+        ]
+        
+        for pattern, mapper in age_patterns:
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    profile_data["age_range"] = mapper(match)
+                    logger.info(f"Extracted age_range: {profile_data['age_range']}")
+                    break
+                except (ValueError, IndexError):
+                    continue
 
-        profile = (
-            ExtractedUserProfile(
-                **profile_data, confidence=0.3, extracted_from=text
+        # Family structure extraction
+        family_keywords = {
+            "single": ["单身", "未婚", "一个人"],
+            "married": ["已婚", "结婚", "夫妻", "老公", "老婆", "丈夫", "妻子"],
+            "married_with_kids": ["孩子", "小孩", "儿子", "女儿", "宝宝", "家庭", "一家三口", "一家四口"],
+        }
+        
+        for structure, keywords in family_keywords.items():
+            if any(keyword in text for keyword in keywords):
+                profile_data["family_structure"] = structure
+                logger.info(f"Extracted family_structure: {structure}")
+                # married_with_kids takes priority over married
+                if structure == "married_with_kids":
+                    break
+
+        # Risk preference extraction
+        risk_keywords = {
+            "conservative": ["保守", "稳健", "安全", "低风险", "谨慎", "稳定"],
+            "moderate": ["中等", "适中", "平衡", "中风险"],
+            "aggressive": ["激进", "高风险", "进取", "冒险", "高收益"],
+        }
+        
+        for risk_level, keywords in risk_keywords.items():
+            if any(keyword in text for keyword in keywords):
+                profile_data["risk_preference"] = risk_level
+                logger.info(f"Extracted risk_preference: {risk_level}")
+                break
+
+        # Occupation extraction
+        occupation_keywords = [
+            "程序员", "工程师", "医生", "教师", "律师", "会计", "销售", "经理", 
+            "公务员", "学生", "退休", "自由职业", "创业", "老板"
+        ]
+        
+        for occupation in occupation_keywords:
+            if occupation in text:
+                profile_data["occupation"] = occupation
+                logger.info(f"Extracted occupation: {occupation}")
+                break
+
+        # Income and expense extraction
+        import re
+        
+        # Monthly expense patterns - improved to handle more formats
+        expense_patterns = [
+            r'月支出\s*大概\s*(\d+(?:\.\d+)?)\s*万',  # "月支出大概1.5万"
+            r'月支出\s*(\d+(?:\.\d+)?)\s*万',        # "月支出1.5万"
+            r'每月支出\s*大概\s*(\d+(?:\.\d+)?)\s*万', # "每月支出大概1.5万"
+            r'每月支出\s*(\d+(?:\.\d+)?)\s*万',       # "每月支出1.5万"
+            r'月支出\s*大概\s*(\d+)',                # "月支出大概15000"
+            r'月支出\s*(\d+)',                      # "月支出15000"
+            r'每月花费\s*(\d+)',                    # "每月花费15000"
+            r'月开销\s*(\d+)',                      # "月开销15000"
+            r'一个月\s*(\d+)',                      # "一个月15000"
+        ]
+        
+        for pattern in expense_patterns:
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    expense_str = match.group(1)
+                    expense = float(expense_str)
+                    
+                    # Handle "万" unit
+                    if '万' in pattern:
+                        expense = expense * 10000
+                    
+                    profile_data["monthly_expense"] = expense
+                    logger.info(f"Extracted monthly_expense: {expense}")
+                    break
+                except ValueError:
+                    continue
+
+        # Income range extraction - improved patterns
+        income_patterns = [
+            (r'年收入\s*大概\s*(\d+)\s*万', lambda m: f"{m.group(1)}万"),
+            (r'年收入\s*(\d+)\s*万', lambda m: f"{m.group(1)}万"),
+            (r'月收入\s*(\d+)\s*万', lambda m: f"{int(float(m.group(1)) * 12)}万"),
+            (r'月收入\s*(\d+)', lambda m: f"{int(float(m.group(1)) * 12 / 10000)}万" if float(m.group(1)) > 1000 else f"{m.group(1)}"),
+        ]
+        
+        for pattern, formatter in income_patterns:
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    profile_data["income_range"] = formatter(match)
+                    logger.info(f"Extracted income_range: {profile_data['income_range']}")
+                    break
+                except (ValueError, IndexError):
+                    continue
+
+        # Create profile if we have any meaningful data
+        profile = None
+        if profile_data:
+            logger.info(f"Creating ExtractedUserProfile with data: {profile_data}")
+            profile = ExtractedUserProfile(
+                **profile_data, 
+                confidence=0.5,  # Higher confidence for fallback since we're using multiple patterns
+                extracted_from=text
             )
-            if profile_data
-            else None
-        )
+        else:
+            logger.info("No profile data extracted in fallback mode")
 
         validation = self._create_validation(assets, profile, "new_info")
 
         return assets, profile, validation
+
+    def _map_age_to_range(self, age: int) -> str:
+        """Map specific age to age range"""
+        if age < 20:
+            return "20-30"
+        elif age < 30:
+            return "20-30"
+        elif age < 40:
+            return "30-40"
+        elif age < 50:
+            return "40-50"
+        elif age < 60:
+            return "50-60"
+        else:
+            return "60+"
+
+    def _fallback_profile_extraction(self, user_message: str) -> ExtractedUserProfile | None:
+        """Fallback profile extraction using regex patterns when LLM fails"""
+        logger.info("Using fallback profile extraction")
+        
+        profile_data = {}
+        text = user_message.lower()
+        
+        # Age range extraction
+        import re
+        age_patterns = [
+            (r'(\d{2})\s*岁', lambda m: self._map_age_to_range(int(m.group(1)))),
+            (r'今年\s*(\d{2})', lambda m: self._map_age_to_range(int(m.group(1)))),
+            (r'(\d{2})\s*年', lambda m: self._map_age_to_range(int(m.group(1)))),
+        ]
+        
+        for pattern, mapper in age_patterns:
+            match = re.search(pattern, user_message)
+            if match:
+                try:
+                    profile_data["age_range"] = mapper(match)
+                    break
+                except (ValueError, IndexError):
+                    continue
+        
+        # Family structure extraction
+        family_keywords = {
+            "single": ["单身", "未婚", "一个人"],
+            "married": ["已婚", "结婚", "夫妻", "老公", "老婆", "丈夫", "妻子"],
+            "married_with_kids": ["孩子", "小孩", "儿子", "女儿", "宝宝", "家庭", "一家三口", "一家四口"],
+        }
+        
+        for structure, keywords in family_keywords.items():
+            if any(keyword in text for keyword in keywords):
+                profile_data["family_structure"] = structure
+                if structure == "married_with_kids":
+                    break
+        
+        # Risk preference extraction
+        risk_keywords = {
+            "conservative": ["保守", "稳健", "安全", "低风险", "谨慎", "稳定"],
+            "moderate": ["中等", "适中", "平衡", "中风险"],
+            "aggressive": ["激进", "高风险", "进取", "冒险", "高收益"],
+        }
+        
+        for risk_level, keywords in risk_keywords.items():
+            if any(keyword in text for keyword in keywords):
+                profile_data["risk_preference"] = risk_level
+                break
+        
+        # Create profile if we have any data
+        if profile_data:
+            return ExtractedUserProfile(
+                **profile_data,
+                confidence=0.6,  # Medium confidence for fallback
+                extracted_from=user_message
+            )
+        
+        return None
+
+    def _fallback_asset_extraction(self, user_message: str) -> list[ExtractedAsset]:
+        """Fallback asset extraction using keyword matching when LLM fails"""
+        logger.info("Using fallback asset extraction")
+        
+        assets = []
+        text = user_message.lower()
+        
+        # Real estate detection
+        if any(keyword in text for keyword in ["房产", "房子", "住房", "小区", "楼盘", "公寓"]):
+            assets.append(ExtractedAsset(
+                asset_type=AssetType.REAL_ESTATE,
+                name="房产",
+                value=None,
+                confidence=0.6,
+                extracted_from=user_message,
+            ))
+        
+        # Cash detection
+        if any(keyword in text for keyword in ["现金", "存款", "银行", "储蓄"]):
+            assets.append(ExtractedAsset(
+                asset_type=AssetType.CASH,
+                name="现金",
+                value=None,
+                confidence=0.6,
+                extracted_from=user_message,
+            ))
+        
+        # Investment detection
+        if any(keyword in text for keyword in ["股票", "基金", "投资", "理财"]):
+            assets.append(ExtractedAsset(
+                asset_type=AssetType.INVESTMENT,
+                name="投资",
+                value=None,
+                confidence=0.6,
+                extracted_from=user_message,
+            ))
+        
+        return assets
+
+    def _fallback_intent_detection(self, user_message: str) -> dict[str, Any]:
+        """Fallback intent detection using keyword matching when LLM fails"""
+        logger.info("Using fallback intent detection")
+        
+        text = user_message.lower()
+        
+        # Correction detection
+        correction_keywords = ["不是", "不对", "应该是", "其实是", "错了", "不是这样"]
+        if any(keyword in text for keyword in correction_keywords):
+            return {
+                "primary_intent": "correction",
+                "correction_type": "value",
+                "confidence": 0.7,
+                "emotional_state": "neutral",
+                "conversation_stage": "information_gathering"
+            }
+        
+        # Question detection
+        question_keywords = ["什么", "怎么", "如何", "为什么", "?", "？"]
+        if any(keyword in text for keyword in question_keywords):
+            return {
+                "primary_intent": "question",
+                "correction_type": "none",
+                "confidence": 0.7,
+                "emotional_state": "neutral",
+                "conversation_stage": "information_gathering"
+            }
+        
+        # Default to new_info
+        return {
+            "primary_intent": "new_info",
+            "correction_type": "none",
+            "confidence": 0.6,
+            "emotional_state": "neutral",
+            "conversation_stage": "information_gathering"
+        }
 
 
 # Global extractor instance

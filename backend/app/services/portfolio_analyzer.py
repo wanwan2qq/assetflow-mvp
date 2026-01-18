@@ -26,10 +26,81 @@ class SPQuadrant(str, Enum):
     PRESERVATION_MONEY = "preservation"  # 保本升值的钱 (稳健投资)
 
 
+class AssetTaxonomy:
+    """Asset classification taxonomy with normalized subtypes and risk levels"""
+
+    # Low-risk investment subtypes (Preservation Money)
+    LOW_RISK_SUBTYPES = frozenset([
+        "bond",
+        "money_fund",
+        "债券",
+        "货币基金",
+        "国债",
+        "定期存款",
+        "银行理财",
+    ])
+
+    # Medium-risk investment subtypes
+    MEDIUM_RISK_SUBTYPES = frozenset([
+        "balanced_fund",
+        "混合基金",
+        "债券基金",
+        "可转债",
+    ])
+
+    # High-risk investment subtypes (Growth Money)
+    HIGH_RISK_SUBTYPES = frozenset([
+        "stock",
+        "equity_fund",
+        "股票",
+        "股票基金",
+        "指数基金",
+        "etf",
+    ])
+
+    # Risk level constants
+    RISK_LOW = "low"
+    RISK_MEDIUM = "medium"
+    RISK_HIGH = "high"
+
+    # Liquidity discount factors
+    LIQUIDITY_DISCOUNT_REAL_ESTATE = 0.8  # Real estate is illiquid
+    LIQUIDITY_DISCOUNT_NONE = 1.0  # Fully liquid assets
+
+    @classmethod
+    def normalize_subtype(cls, subtype: str | None) -> str:
+        """Normalize asset subtype to lowercase and strip whitespace"""
+        if not subtype:
+            return ""
+        return str(subtype).lower().strip()
+
+    @classmethod
+    def get_risk_level_from_subtype(cls, subtype: str) -> str:
+        """Determine risk level from normalized subtype"""
+        normalized = cls.normalize_subtype(subtype)
+        if normalized in cls.LOW_RISK_SUBTYPES:
+            return cls.RISK_LOW
+        elif normalized in cls.MEDIUM_RISK_SUBTYPES:
+            return cls.RISK_MEDIUM
+        elif normalized in cls.HIGH_RISK_SUBTYPES:
+            return cls.RISK_HIGH
+        return cls.RISK_MEDIUM  # Default to medium risk
+
+
+class AnalysisStatus(str, Enum):
+    """Analysis status codes"""
+
+    SUCCESS = "success"
+    DATA_INSUFFICIENT = "data_insufficient"
+    ERROR = "error"
+
+
 class PortfolioAnalysis:
     """Portfolio analysis result with Standard & Poor's Four Quadrant Model"""
 
     def __init__(self):
+        self.status: AnalysisStatus = AnalysisStatus.SUCCESS
+        self.status_message: str = ""
         self.net_worth: float = 0.0
         self.real_estate_ratio: float = 0.0
         self.liquidity_ratio: float = 0.0
@@ -71,6 +142,10 @@ class PortfolioAnalyzer:
         analysis = PortfolioAnalysis()
 
         try:
+            # Validate input data
+            if not self._validate_analysis_inputs(assets, user_profile, analysis):
+                return analysis
+
             # Calculate basic metrics
             analysis.net_worth = self._calculate_net_worth(assets)
             analysis.real_estate_ratio = self._calculate_real_estate_ratio(
@@ -99,6 +174,8 @@ class PortfolioAnalyzer:
                 analysis.quadrant_allocations,
                 analysis.ideal_allocations,
                 analysis.net_worth,
+                assets,
+                user_profile,
             )
 
             # Generate risk warnings (enhanced with quadrant analysis)
@@ -114,10 +191,37 @@ class PortfolioAnalyzer:
             # Determine overall risk level
             analysis.overall_risk_level = self._determine_overall_risk_level(analysis)
 
+            analysis.status = AnalysisStatus.SUCCESS
+
         except Exception as e:
-            logger.error(f"Error analyzing portfolio: {e}")
+            logger.error(f"Error analyzing portfolio: {e}", exc_info=True)
+            analysis.status = AnalysisStatus.ERROR
+            analysis.status_message = f"分析过程中发生错误: {str(e)}"
 
         return analysis
+
+    def _validate_analysis_inputs(
+        self,
+        assets: list[UserAsset],
+        user_profile: UserProfile | None,
+        analysis: PortfolioAnalysis,
+    ) -> bool:
+        """Validate inputs for portfolio analysis to prevent division by zero and data issues"""
+        # Check if we have any assets
+        if not assets:
+            analysis.status = AnalysisStatus.DATA_INSUFFICIENT
+            analysis.status_message = "没有资产数据，无法进行分析"
+            return False
+
+        # Check if monthly expense is valid when provided
+        if user_profile and user_profile.monthly_expense is not None:
+            if user_profile.monthly_expense <= 0:
+                logger.warning(
+                    f"Invalid monthly_expense: {user_profile.monthly_expense}, will use estimation"
+                )
+                # Don't fail, just log warning - we'll estimate instead
+
+        return True
 
     def _calculate_net_worth(self, assets: list[UserAsset]) -> float:
         """Calculate total net worth: assets - liabilities"""
@@ -153,16 +257,32 @@ class PortfolioAnalyzer:
             asset.value for asset in assets if asset.asset_type == AssetType.CASH
         )
 
-        if not user_profile or not user_profile.monthly_expense:
-            # Use estimated monthly expense based on net worth
-            estimated_monthly = self._estimate_monthly_expense(assets)
-            return cash_value / estimated_monthly if estimated_monthly > 0 else 0.0
+        monthly_expense = self._get_monthly_expense(assets, user_profile)
 
-        return cash_value / user_profile.monthly_expense
+        # Avoid division by zero
+        if monthly_expense <= 0:
+            logger.warning("Monthly expense is zero or negative, returning 0 liquidity ratio")
+            return 0.0
+
+        return cash_value / monthly_expense
+
+    def _get_monthly_expense(
+        self, assets: list[UserAsset], user_profile: UserProfile | None
+    ) -> float:
+        """Get monthly expense from profile or estimate it"""
+        if user_profile and user_profile.monthly_expense and user_profile.monthly_expense > 0:
+            return user_profile.monthly_expense
+
+        # Use estimated monthly expense based on net worth
+        return self._estimate_monthly_expense(assets)
 
     def _estimate_monthly_expense(self, assets: list[UserAsset]) -> float:
         """Estimate monthly expenses based on asset level"""
         net_worth = self._calculate_net_worth(assets)
+
+        # Avoid negative or zero net worth
+        if net_worth <= 0:
+            return 0.0
 
         # Simple estimation: 2-4% of net worth annually, divided by 12
         if net_worth > 10000000:  # > 1000万
@@ -171,6 +291,28 @@ class PortfolioAnalyzer:
             return net_worth * 0.03 / 12
         else:
             return net_worth * 0.02 / 12
+
+    def _get_asset_subtype(self, asset: UserAsset) -> str:
+        """
+        Safely extract and normalize asset subtype from extra_data.
+        Returns normalized lowercase string.
+        """
+        if not asset.extra_data:
+            return ""
+
+        subtype = asset.extra_data.get("subtype", "")
+        return AssetTaxonomy.normalize_subtype(subtype)
+
+    def _get_asset_risk_level(self, asset: UserAsset) -> str:
+        """
+        Safely extract and normalize risk level from extra_data.
+        Returns normalized lowercase string.
+        """
+        if not asset.extra_data:
+            return ""
+
+        risk_level = asset.extra_data.get("risk_level", "")
+        return AssetTaxonomy.normalize_subtype(risk_level)
 
     def _adjust_thresholds_for_user(
         self, user_profile: UserProfile | None
@@ -182,7 +324,8 @@ class PortfolioAnalyzer:
             return thresholds
 
         # Adjust based on age - this should be applied first
-        if user_profile.age_range:
+        # ✅ Skip adjustment if age_range is "unknown"
+        if user_profile.age_range and user_profile.age_range != "unknown":
             if (
                 "20-30" in user_profile.age_range
                 or "25-35" in user_profile.age_range
@@ -201,26 +344,30 @@ class PortfolioAnalyzer:
                 thresholds["liquidity_min"] = 4.0
 
         # Adjust based on family structure - this can override age adjustments for liquidity
-        if user_profile.family_structure == "married_with_kids":
-            # Families need more liquidity - increase from current threshold
-            thresholds["liquidity_min"] = max(
-                thresholds["liquidity_min"], 15.0
-            )  # 15 months for families with kids
-        elif user_profile.family_structure == "single":
-            # Singles can be slightly more aggressive with liquidity only
-            thresholds["liquidity_min"] = min(thresholds["liquidity_min"], 2.5)
+        # ✅ Skip adjustment if family_structure is "unknown"
+        if user_profile.family_structure and user_profile.family_structure != "unknown":
+            if user_profile.family_structure == "married_with_kids":
+                # Families need more liquidity - increase from current threshold
+                thresholds["liquidity_min"] = max(
+                    thresholds["liquidity_min"], 15.0
+                )  # 15 months for families with kids
+            elif user_profile.family_structure == "single":
+                # Singles can be slightly more aggressive with liquidity only
+                thresholds["liquidity_min"] = min(thresholds["liquidity_min"], 2.5)
 
         # Adjust based on risk preference - more nuanced adjustments
-        if user_profile.risk_preference == "conservative":
-            # Conservative users: stricter thresholds, but respect family structure liquidity needs
-            thresholds["real_estate_max"] = min(thresholds["real_estate_max"], 0.60)
-            thresholds["liquidity_min"] = max(thresholds["liquidity_min"], 5.0)
-        elif user_profile.risk_preference == "aggressive":
-            # Aggressive users: more relaxed thresholds, but still respect family structure
-            thresholds["real_estate_max"] = max(thresholds["real_estate_max"], 0.80)
-            # For liquidity, aggressive users can be more relaxed, but families still need more
-            if user_profile.family_structure != "married_with_kids":
-                thresholds["liquidity_min"] = min(thresholds["liquidity_min"], 2.0)
+        # ✅ Skip adjustment if risk_preference is "unknown"
+        if user_profile.risk_preference and user_profile.risk_preference != "unknown":
+            if user_profile.risk_preference == "conservative":
+                # Conservative users: stricter thresholds, but respect family structure liquidity needs
+                thresholds["real_estate_max"] = min(thresholds["real_estate_max"], 0.60)
+                thresholds["liquidity_min"] = max(thresholds["liquidity_min"], 5.0)
+            elif user_profile.risk_preference == "aggressive":
+                # Aggressive users: more relaxed thresholds, but still respect family structure
+                thresholds["real_estate_max"] = max(thresholds["real_estate_max"], 0.80)
+                # For liquidity, aggressive users can be more relaxed, but families still need more
+                if user_profile.family_structure != "married_with_kids":
+                    thresholds["liquidity_min"] = min(thresholds["liquidity_min"], 2.0)
 
         return thresholds
 
@@ -235,7 +382,8 @@ class PortfolioAnalyzer:
 
         # Start with base allocations and adjust step by step
         # Adjust based on age first
-        if user_profile.age_range:
+        # ✅ Skip adjustment if age_range is "unknown"
+        if user_profile.age_range and user_profile.age_range != "unknown":
             if "20-30" in user_profile.age_range or "25-35" in user_profile.age_range:
                 # Young users: more growth, less preservation
                 allocations[SPQuadrant.GROWTH_MONEY] = 0.40
@@ -250,47 +398,52 @@ class PortfolioAnalyzer:
                 allocations[SPQuadrant.PRESERVATION_MONEY] = 0.50
 
         # Adjust based on family structure (overrides some age adjustments)
-        if user_profile.family_structure == "married_with_kids":
-            # Families need more emergency funds and life protection
-            allocations[SPQuadrant.SPENDING_MONEY] = 0.15  # More emergency funds
-            allocations[SPQuadrant.LIFE_MONEY] = 0.25  # More insurance
-            allocations[SPQuadrant.GROWTH_MONEY] = 0.25  # Reduce growth
-            allocations[SPQuadrant.PRESERVATION_MONEY] = 0.35  # Increase stability
-        elif user_profile.family_structure == "single":
-            # Singles can be more aggressive
-            allocations[SPQuadrant.SPENDING_MONEY] = 0.08
-            allocations[SPQuadrant.LIFE_MONEY] = 0.15
-            # Keep age-based growth/preservation adjustments for singles
+        # ✅ Skip adjustment if family_structure is "unknown"
+        if user_profile.family_structure and user_profile.family_structure != "unknown":
+            if user_profile.family_structure == "married_with_kids":
+                # Families need more emergency funds and life protection
+                allocations[SPQuadrant.SPENDING_MONEY] = 0.15  # More emergency funds
+                allocations[SPQuadrant.LIFE_MONEY] = 0.25  # More insurance
+                allocations[SPQuadrant.GROWTH_MONEY] = 0.25  # Reduce growth
+                allocations[SPQuadrant.PRESERVATION_MONEY] = 0.35  # Increase stability
+            elif user_profile.family_structure == "single":
+                # Singles can be more aggressive
+                allocations[SPQuadrant.SPENDING_MONEY] = 0.08
+                allocations[SPQuadrant.LIFE_MONEY] = 0.15
+                # Keep age-based growth/preservation adjustments for singles
 
         # Adjust based on risk preference (final override with rebalancing)
-        if user_profile.risk_preference == "conservative":
-            # Conservative users need more safety
-            spending = max(allocations[SPQuadrant.SPENDING_MONEY], 0.15)
-            life = max(allocations[SPQuadrant.LIFE_MONEY], 0.25)
-            growth = 0.15  # Conservative growth
-            preservation = 1.0 - spending - life - growth  # Remainder
+        # ✅ Skip adjustment if risk_preference is "unknown"
+        if user_profile.risk_preference and user_profile.risk_preference != "unknown":
+            if user_profile.risk_preference == "conservative":
+                # Conservative users need more safety
+                spending = max(allocations[SPQuadrant.SPENDING_MONEY], 0.15)
+                life = max(allocations[SPQuadrant.LIFE_MONEY], 0.25)
+                growth = 0.15  # Conservative growth
+                preservation = 1.0 - spending - life - growth  # Remainder
 
-            allocations[SPQuadrant.SPENDING_MONEY] = spending
-            allocations[SPQuadrant.LIFE_MONEY] = life
-            allocations[SPQuadrant.GROWTH_MONEY] = growth
-            allocations[SPQuadrant.PRESERVATION_MONEY] = max(preservation, 0.40)
+                allocations[SPQuadrant.SPENDING_MONEY] = spending
+                allocations[SPQuadrant.LIFE_MONEY] = life
+                allocations[SPQuadrant.GROWTH_MONEY] = growth
+                allocations[SPQuadrant.PRESERVATION_MONEY] = max(preservation, 0.40)
 
-        elif user_profile.risk_preference == "aggressive":
-            # Aggressive users want more growth
-            if user_profile.family_structure == "married_with_kids":
-                # Families still need minimums
-                spending = 0.15
-                life = 0.25
-                growth = 0.35  # Reduced from 0.45 for families
-                preservation = 0.25
-            else:
-                # Singles can be more aggressive
-                spending = 0.08
-                life = 0.15
-                growth = 0.45
-                preservation = 0.32
+            elif user_profile.risk_preference == "aggressive":
+                # Aggressive users want more growth
+                # ✅ Check family_structure is not "unknown" before using it
+                if user_profile.family_structure and user_profile.family_structure != "unknown" and user_profile.family_structure == "married_with_kids":
+                    # Families still need minimums
+                    spending = 0.15
+                    life = 0.25
+                    growth = 0.35  # Reduced from 0.45 for families
+                    preservation = 0.25
+                else:
+                    # Singles can be more aggressive
+                    spending = 0.08
+                    life = 0.15
+                    growth = 0.45
+                    preservation = 0.32
 
-            allocations[SPQuadrant.SPENDING_MONEY] = spending
+                allocations[SPQuadrant.SPENDING_MONEY] = spending
             allocations[SPQuadrant.LIFE_MONEY] = life
             allocations[SPQuadrant.GROWTH_MONEY] = growth
             allocations[SPQuadrant.PRESERVATION_MONEY] = preservation
@@ -315,11 +468,13 @@ class PortfolioAnalyzer:
             SPQuadrant.PRESERVATION_MONEY: 0.0,
         }
 
-        monthly_expense = (
-            user_profile.monthly_expense
-            if user_profile and user_profile.monthly_expense
-            else self._estimate_monthly_expense(assets)
-        )
+        monthly_expense = self._get_monthly_expense(assets, user_profile)
+
+        # Calculate monthly debt payment from liabilities
+        monthly_debt_payment = self._calculate_monthly_debt_payment(assets)
+
+        # Spending money threshold includes both expenses and debt servicing
+        spending_threshold = (monthly_expense + monthly_debt_payment) * 6
 
         for asset in assets:
             if asset.asset_type == AssetType.LIABILITY:
@@ -327,8 +482,7 @@ class PortfolioAnalyzer:
 
             # Classify based on asset type and characteristics
             if asset.asset_type == AssetType.CASH:
-                # First 6 months of expenses go to spending money
-                spending_threshold = monthly_expense * 6
+                # First 6 months of (expenses + debt) go to spending money
                 if quadrant_values[SPQuadrant.SPENDING_MONEY] < spending_threshold:
                     spending_allocation = min(
                         asset.value,
@@ -349,17 +503,50 @@ class PortfolioAnalyzer:
 
             elif asset.asset_type == AssetType.REAL_ESTATE:
                 # Real estate is typically preservation money (conservative assumption)
-                # In a more sophisticated system, we could distinguish between
-                # investment properties (growth) vs primary residence (preservation)
-                quadrant_values[SPQuadrant.PRESERVATION_MONEY] += asset.value
+                # Apply liquidity discount factor for real estate
+                liquid_value = asset.value * AssetTaxonomy.LIQUIDITY_DISCOUNT_REAL_ESTATE
+                quadrant_values[SPQuadrant.PRESERVATION_MONEY] += liquid_value
 
             elif asset.asset_type == AssetType.INVESTMENT:
-                # Investment classification could be more sophisticated
-                # For now, assume all investments are growth money
-                # In practice, we'd need to know the risk level of specific investments
-                quadrant_values[SPQuadrant.GROWTH_MONEY] += asset.value
+                # Use helper methods for safe metadata access
+                risk_level = self._get_asset_risk_level(asset)
+                subtype = self._get_asset_subtype(asset)
+
+                # Determine risk level from subtype if not explicitly set
+                if not risk_level and subtype:
+                    risk_level = AssetTaxonomy.get_risk_level_from_subtype(subtype)
+
+                # Low-risk investments go to preservation
+                if risk_level == AssetTaxonomy.RISK_LOW or subtype in AssetTaxonomy.LOW_RISK_SUBTYPES:
+                    quadrant_values[SPQuadrant.PRESERVATION_MONEY] += asset.value
+                else:
+                    # High/medium risk investments go to growth
+                    quadrant_values[SPQuadrant.GROWTH_MONEY] += asset.value
 
         return quadrant_values
+
+    def _calculate_monthly_debt_payment(self, assets: list[UserAsset]) -> float:
+        """Calculate estimated monthly debt payment from liabilities"""
+        total_debt = sum(
+            asset.value for asset in assets if asset.asset_type == AssetType.LIABILITY
+        )
+
+        # Check if any liability has specific payment info in metadata
+        monthly_payment = 0.0
+        for asset in assets:
+            if asset.asset_type == AssetType.LIABILITY:
+                metadata = asset.extra_data if asset.extra_data else {}
+                # Check for explicit monthly payment in metadata
+                if "monthly_payment" in metadata:
+                    monthly_payment += float(metadata["monthly_payment"])
+                elif "月供" in metadata:
+                    monthly_payment += float(metadata["月供"])
+                else:
+                    # Estimate: 0.5% of liability value as monthly payment
+                    # This approximates a 30-year mortgage at ~4-5% interest
+                    monthly_payment += asset.value * 0.005
+
+        return monthly_payment
 
     def _calculate_allocation_gaps(
         self,
@@ -382,17 +569,32 @@ class PortfolioAnalyzer:
         current: dict[SPQuadrant, float],
         ideal: dict[SPQuadrant, float],
         net_worth: float,
+        assets: list[UserAsset],
+        user_profile: UserProfile | None,
     ) -> dict[str, Any]:
         """Generate detailed quadrant analysis"""
         analysis = {"quadrants": {}, "summary": {}, "priorities": []}
 
         total_current = sum(current.values())
 
+        # Calculate expense-based spending money requirement
+        monthly_expense = self._get_monthly_expense(assets, user_profile)
+        monthly_debt_payment = self._calculate_monthly_debt_payment(assets)
+        ideal_spending_amount = (monthly_expense + monthly_debt_payment) * 6
+
         for quadrant in SPQuadrant:
             current_amount = current[quadrant]
-            ideal_amount = ideal[quadrant] * net_worth
             current_ratio = current_amount / total_current if total_current > 0 else 0
             ideal_ratio = ideal[quadrant]
+
+            # Override ideal amount for spending money with expense-based calculation
+            if quadrant == SPQuadrant.SPENDING_MONEY:
+                ideal_amount = ideal_spending_amount
+                # Recalculate ideal ratio based on actual ideal amount
+                ideal_ratio = ideal_amount / net_worth if net_worth > 0 else ideal_ratio
+            else:
+                ideal_amount = ideal_ratio * net_worth
+
             gap = ideal_amount - current_amount
 
             quadrant_name = {
@@ -428,12 +630,14 @@ class PortfolioAnalyzer:
         # Sort priorities by gap size
         analysis["priorities"].sort(key=lambda x: abs(x["gap"]), reverse=True)
 
-        # Generate summary
+        # Generate summary with safe division
+        allocation_efficiency = 0.0
+        if net_worth > 0:
+            allocation_efficiency = min(1.0, total_current / net_worth)
+
         analysis["summary"] = {
             "total_allocated": total_current,
-            "allocation_efficiency": min(1.0, total_current / net_worth)
-            if net_worth > 0
-            else 0,
+            "allocation_efficiency": allocation_efficiency,
             "major_gaps": len(
                 [p for p in analysis["priorities"] if p["priority"] == "high"]
             ),
@@ -690,11 +894,7 @@ class PortfolioAnalyzer:
 
             # Liquidity recommendations
             if analysis.liquidity_ratio < thresholds["liquidity_min"]:
-                monthly_expense = (
-                    user_profile.monthly_expense
-                    if user_profile and user_profile.monthly_expense
-                    else self._estimate_monthly_expense(assets)
-                )
+                monthly_expense = self._get_monthly_expense(assets, user_profile)
                 target_cash = monthly_expense * thresholds["liquidity_min"]
                 current_cash = sum(
                     asset.value

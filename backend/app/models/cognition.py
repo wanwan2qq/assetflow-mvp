@@ -46,6 +46,16 @@ class UserCognition(SQLModel, table=True):
         description="AI advisor's internal summary of the user's situation and preferences"
     )
     
+    # Memory extraction tracking (Phase 4 - Incremental Extraction Fix)
+    last_analyzed_message_id: int | None = Field(
+        default=None,
+        description="ID of the last message analyzed for memory extraction"
+    )
+    last_memory_extraction_at: datetime | None = Field(
+        default=None,
+        description="Timestamp of the last memory extraction"
+    )
+    
     # Timestamps
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

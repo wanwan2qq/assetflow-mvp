@@ -13,6 +13,7 @@ from sqlmodel import select
 
 from app.core.config import settings
 from app.core.database import get_db_session
+from app.core.prompt_manager import prompt_manager
 from app.models.chat import ChatMessage, MessageRole
 from app.models.cognition import UserCognition
 
@@ -60,6 +61,8 @@ class InsightService:
         """
         Analyze user's psychological profile from conversation history
         
+        ✅ FIXED: Now uses incremental analysis to prevent duplicate memory extraction
+        
         Args:
             user_id: User ID to analyze
             recent_messages: Optional pre-fetched messages (for optimization)
@@ -69,14 +72,29 @@ class InsightService:
             Analysis result with risk_profile, sentiment, and advisor_note
         """
         try:
-            # Fetch recent conversation history if not provided
-            if recent_messages is None:
-                recent_messages = await self._fetch_recent_messages(user_id, limit=50)
+            # ✅ Step 1: Get the last analyzed message ID
+            last_analyzed_id = await self._get_last_analyzed_message_id(user_id)
             
-            # Skip analysis if insufficient conversation data
-            if len(recent_messages) < trigger_threshold:
-                logger.debug(f"Insufficient messages ({len(recent_messages)}) for user {user_id} - skipping analysis")
-                return {"skipped": True, "reason": "insufficient_data"}
+            # ✅ Step 2: Fetch ONLY NEW messages (not analyzed before)
+            if recent_messages is None:
+                recent_messages = await self._fetch_new_messages(
+                    user_id, 
+                    after_message_id=last_analyzed_id,
+                    limit=50
+                )
+            
+            # ✅ Step 3: Skip if no new messages
+            if not recent_messages:
+                logger.debug(f"No new messages for user {user_id} - skipping analysis")
+                return {"skipped": True, "reason": "no_new_messages"}
+            
+            # ✅ Step 4: Skip if insufficient new messages (LOWERED threshold for better responsiveness)
+            if len(recent_messages) < 3:  # ✅ LOWERED from 5 to 3 messages
+                logger.debug(
+                    f"Insufficient new messages ({len(recent_messages)}) for user {user_id} "
+                    f"- skipping analysis (threshold=3)"
+                )
+                return {"skipped": True, "reason": "insufficient_new_messages"}
             
             # Perform psychological analysis
             if self.has_real_openai_key and self.llm:
@@ -87,10 +105,18 @@ class InsightService:
             # Update UserCognition with insights
             await self._update_cognition_insights(user_id, analysis)
             
-            # Phase 4: Extract and store key memories in L3 Vector Memory
+            # ✅ Step 5: Extract memories from NEW messages only
             await self._extract_and_store_key_memories(user_id, recent_messages)
             
-            logger.info(f"Completed psychological analysis for user {user_id}")
+            # ✅ Step 6: Update the last analyzed message ID
+            if recent_messages:
+                last_message_id = recent_messages[-1].id
+                await self._update_last_analyzed_message_id(user_id, last_message_id)
+            
+            logger.info(
+                f"✅ Completed incremental analysis for user {user_id}: "
+                f"analyzed {len(recent_messages)} new messages"
+            )
             return analysis
             
         except Exception as e:
@@ -118,80 +144,109 @@ class InsightService:
             logger.error(f"Error fetching messages for user {user_id}: {e}")
             return []
 
+    async def _get_last_analyzed_message_id(self, user_id: int) -> int | None:
+        """Get the ID of the last analyzed message for this user"""
+        try:
+            async for session in get_db_session():
+                statement = select(UserCognition).where(UserCognition.user_id == user_id)
+                result = await session.execute(statement)
+                cognition = result.scalar_one_or_none()
+                
+                if cognition:
+                    return cognition.last_analyzed_message_id
+                
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting last analyzed message ID: {e}")
+            return None
+
+    async def _fetch_new_messages(
+        self, 
+        user_id: int, 
+        after_message_id: int | None = None,
+        limit: int = 50
+    ) -> list[ChatMessage]:
+        """
+        Fetch only NEW messages after the last analyzed message
+        This is the KEY to preventing duplicate memory extraction
+        """
+        try:
+            async for session in get_db_session():
+                statement = (
+                    select(ChatMessage)
+                    .where(ChatMessage.user_id == user_id)
+                )
+                
+                # ✅ CRITICAL: Only fetch messages AFTER the last analyzed one
+                if after_message_id is not None:
+                    statement = statement.where(ChatMessage.id > after_message_id)
+                    logger.info(f"Fetching messages after ID {after_message_id} for user {user_id}")
+                else:
+                    logger.info(f"Fetching all messages for user {user_id} (first analysis)")
+                
+                statement = (
+                    statement
+                    .order_by(ChatMessage.timestamp.desc())
+                    .limit(limit)
+                )
+                
+                result = await session.execute(statement)
+                messages = result.scalars().all()
+                
+                # Return in chronological order (oldest first)
+                new_messages = list(reversed(messages))
+                logger.info(f"Fetched {len(new_messages)} new messages for user {user_id}")
+                
+                return new_messages
+                
+        except Exception as e:
+            logger.error(f"Error fetching new messages for user {user_id}: {e}")
+            return []
+
+    async def _update_last_analyzed_message_id(self, user_id: int, message_id: int) -> None:
+        """Update the last analyzed message ID after successful extraction"""
+        try:
+            async for session in get_db_session():
+                statement = select(UserCognition).where(UserCognition.user_id == user_id)
+                result = await session.execute(statement)
+                cognition = result.scalar_one_or_none()
+                
+                if not cognition:
+                    cognition = UserCognition(user_id=user_id)
+                    session.add(cognition)
+                
+                cognition.last_analyzed_message_id = message_id
+                cognition.last_memory_extraction_at = datetime.utcnow()
+                cognition.updated_at = datetime.utcnow()
+                
+                await session.commit()
+                logger.info(f"✅ Updated last analyzed message ID to {message_id} for user {user_id}")
+                
+                break
+                
+        except Exception as e:
+            logger.error(f"Error updating last analyzed message ID: {e}")
+
     async def _analyze_with_llm(self, messages: list[ChatMessage]) -> dict[str, Any]:
         """Perform deep psychological analysis using LLM"""
         
         # Prepare conversation history for analysis
         conversation_text = self._format_conversation_for_analysis(messages)
         
-        # System prompt for psychological profiling
-        system_prompt = """你是一位资深的财务心理学专家和行为金融学顾问。你的任务是分析用户的对话内容，深入理解他们的：
-
-1. **风险承受能力 (Risk Tolerance)**
-   - conservative (保守型): 害怕损失，优先保本
-   - moderate (稳健型): 平衡风险与收益
-   - aggressive (激进型): 追求高收益，能承受波动
-
-2. **决策风格 (Decision Style)**
-   - analytical (分析型): 需要详细数据和逻辑推理
-   - intuitive (直觉型): 依赖感觉和经验
-   - cautious (谨慎型): 需要反复确认，害怕犯错
-   - impulsive (冲动型): 快速决策，容易受情绪影响
-
-3. **当前情绪状态 (Current Sentiment)**
-   - anxious (焦虑): 担心、压力大
-   - confident (自信): 对财务状况有信心
-   - confused (困惑): 不知道该怎么办
-   - optimistic (乐观): 对未来充满希望
-   - stressed (压力): 财务压力明显
-
-4. **关键心理特征 (Key Psychological Traits)**
-   - 对损失的敏感度
-   - 对不确定性的容忍度
-   - 财务知识水平
-   - 家庭责任感
-   - 长期规划能力
-
-**分析要求：**
-- 仔细阅读用户的每一句话，注意语气、用词、情绪表达
-- 识别隐含的担忧、恐惧、期望
-- 基于具体对话内容给出判断，不要臆测
-- 生成实用的顾问策略建议
-
-**输出格式 (JSON)：**
-```json
-{
-  "risk_profile": {
-    "tolerance": "conservative|moderate|aggressive",
-    "decision_style": "analytical|intuitive|cautious|impulsive",
-    "confidence_level": "low|medium|high"
-  },
-  "current_sentiment": "anxious|confident|confused|optimistic|stressed",
-  "psychological_traits": {
-    "loss_aversion": "high|medium|low",
-    "uncertainty_tolerance": "high|medium|low",
-    "financial_literacy": "beginner|intermediate|advanced",
-    "family_responsibility": "high|medium|low",
-    "planning_horizon": "short|medium|long"
-  },
-  "advisor_note_internal": "内部策略建议：如何调整沟通方式、语气、建议类型等。这是给AI顾问看的，用户看不到。",
-  "key_concerns": ["用户最关心的3-5个问题"],
-  "recommended_approach": "建议的沟通策略和建议方向"
-}
-```
-
-**重要提示：**
-- advisor_note_internal 必须具体、可操作，例如："用户对房贷压力很大，建议避免激进投资建议，多强调稳健保本方案，语气要温和安抚"
-- 如果对话内容不足以判断某个维度，使用 "unknown" 或 null
-- 基于事实分析，不要过度解读
-"""
-
-        user_prompt = f"""请分析以下用户对话，生成心理画像和顾问策略：
-
-【对话历史】
-{conversation_text}
-
-请严格按照JSON格式输出分析结果。"""
+        # Load prompts from YAML configuration
+        system_prompt = prompt_manager.render(
+            category="insight",
+            filename="psychology_analysis",
+            key="system_instruction"
+        )
+        
+        user_prompt = prompt_manager.render(
+            category="insight",
+            filename="psychology_analysis",
+            key="user_instruction",
+            conversation_text=conversation_text
+        )
 
         try:
             # Call LLM for analysis
@@ -203,30 +258,51 @@ class InsightService:
             response = await self.llm.ainvoke(messages_for_llm)
             response_text = response.content
             
-            # Parse JSON response
-            # Try to extract JSON from markdown code blocks if present
-            if "```json" in response_text:
-                json_start = response_text.find("```json") + 7
-                json_end = response_text.find("```", json_start)
-                response_text = response_text[json_start:json_end].strip()
-            elif "```" in response_text:
-                json_start = response_text.find("```") + 3
-                json_end = response_text.find("```", json_start)
-                response_text = response_text[json_start:json_end].strip()
+            # Enhanced JSON parsing - handle new flattened structure
+            analysis = self._parse_psychology_response(response_text)
             
-            analysis = json.loads(response_text)
+            logger.info(f"LLM psychological analysis completed: {analysis.get('sentiment', 'unknown')}")
+            return analysis
             
-            logger.info(f"LLM psychological analysis completed: {analysis.get('current_sentiment', 'unknown')}")
+        except Exception as e:
+            logger.error(f"Error in LLM analysis: {e}")
+            return self._create_fallback_analysis(messages)
+
+    def _parse_psychology_response(self, response_text: str) -> dict[str, Any]:
+        """Enhanced JSON parsing for new flattened structure"""
+        try:
+            # Clean response text - remove markdown code blocks
+            cleaned_json = response_text.strip()
+            if "```json" in cleaned_json:
+                json_start = cleaned_json.find("```json") + 7
+                json_end = cleaned_json.find("```", json_start)
+                cleaned_json = cleaned_json[json_start:json_end].strip()
+            elif "```" in cleaned_json:
+                json_start = cleaned_json.find("```") + 3
+                json_end = cleaned_json.find("```", json_start)
+                cleaned_json = cleaned_json[json_start:json_end].strip()
+            
+            analysis = json.loads(cleaned_json)
+            
+            # Validate required fields for new structure
+            required_fields = ["risk_tolerance", "sentiment", "advisor_note"]
+            for field in required_fields:
+                if field not in analysis:
+                    logger.warning(f"Missing required field: {field}")
+                    
+            # Ensure confidence_score is present
+            if "confidence_score" not in analysis:
+                analysis["confidence_score"] = 0.5
+                
             return analysis
             
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse LLM response as JSON: {e}")
             logger.error(f"Response text: {response_text}")
-            # Return a basic analysis as fallback
-            return self._create_fallback_analysis(messages)
+            return self._create_fallback_analysis()
         except Exception as e:
-            logger.error(f"Error in LLM analysis: {e}")
-            return self._create_fallback_analysis(messages)
+            logger.error(f"Error parsing psychology response: {e}")
+            return self._create_fallback_analysis()
 
     def _format_conversation_for_analysis(self, messages: list[ChatMessage]) -> str:
         """Format conversation history for LLM analysis"""
@@ -246,7 +322,7 @@ class InsightService:
         return "\n\n".join(formatted_lines)
 
     def _analyze_mock(self, messages: list[ChatMessage]) -> dict[str, Any]:
-        """Mock analysis for development environment"""
+        """Mock analysis for development environment - updated for new structure"""
         
         # Simple keyword-based analysis for development
         user_messages = [msg.content.lower() for msg in messages if msg.role == MessageRole.USER]
@@ -264,6 +340,10 @@ class InsightService:
         aggressive_keywords = ["高收益", "股票", "激进", "冒险", "快速增长"]
         is_aggressive = any(keyword in all_text for keyword in aggressive_keywords)
         
+        # Detect liquidity anxiety
+        liquidity_keywords = ["手头紧", "没钱花", "转不开", "现金流压力", "资金周转"]
+        has_liquidity_anxiety = any(keyword in all_text for keyword in liquidity_keywords)
+        
         # Determine risk tolerance
         if is_conservative or has_stress:
             tolerance = "conservative"
@@ -279,27 +359,30 @@ class InsightService:
         if has_stress:
             sentiment = "anxious"
         elif is_aggressive:
-            sentiment = "optimistic"
+            sentiment = "confident"
         else:
             sentiment = "neutral"
         
+        # Determine liquidity anxiety
+        if has_liquidity_anxiety:
+            liquidity_anxiety = "high"
+        elif has_stress:
+            liquidity_anxiety = "medium"
+        else:
+            liquidity_anxiety = "low"
+        
         return {
-            "risk_profile": {
-                "tolerance": tolerance,
-                "decision_style": "analytical" if len(user_messages) > 5 else "intuitive",
-                "confidence_level": "low" if has_stress else "medium"
-            },
-            "current_sentiment": sentiment,
-            "psychological_traits": {
-                "loss_aversion": "high" if is_conservative else "medium",
-                "uncertainty_tolerance": "low" if has_stress else "medium",
-                "financial_literacy": "intermediate",
-                "family_responsibility": "high" if "房贷" in all_text or "家庭" in all_text else "medium",
-                "planning_horizon": "long" if "退休" in all_text or "长期" in all_text else "medium"
-            },
-            "advisor_note_internal": advisor_note,
-            "key_concerns": self._extract_key_concerns(all_text),
-            "recommended_approach": "基于用户的风险偏好和当前情绪状态，采用温和、专业的沟通方式"
+            "risk_tolerance": tolerance,
+            "decision_style": "data_driven" if len(user_messages) > 5 else "intuitive",
+            "sentiment": sentiment,
+            "liquidity_anxiety": liquidity_anxiety,
+            "confidence_score": 0.3 if has_stress else 0.7,
+            "loss_aversion": "high" if is_conservative else "medium",
+            "financial_literacy": "intermediate",
+            "family_responsibility": "high" if "房贷" in all_text or "家庭" in all_text else "medium",
+            "planning_horizon": "long" if "退休" in all_text or "长期" in all_text else "medium",
+            "advisor_note": advisor_note,
+            "key_concerns": self._extract_key_concerns(all_text)
         }
 
     def _extract_key_concerns(self, text: str) -> list[str]:
@@ -320,29 +403,24 @@ class InsightService:
         
         return concerns[:5]  # Top 5 concerns
 
-    def _create_fallback_analysis(self, messages: list[ChatMessage]) -> dict[str, Any]:
-        """Create a basic fallback analysis when LLM fails"""
+    def _create_fallback_analysis(self, messages: list[ChatMessage] | None = None) -> dict[str, Any]:
+        """Create a basic fallback analysis when LLM fails - updated for new structure"""
         return {
-            "risk_profile": {
-                "tolerance": "moderate",
-                "decision_style": "analytical",
-                "confidence_level": "medium"
-            },
-            "current_sentiment": "neutral",
-            "psychological_traits": {
-                "loss_aversion": "medium",
-                "uncertainty_tolerance": "medium",
-                "financial_literacy": "intermediate",
-                "family_responsibility": "medium",
-                "planning_horizon": "medium"
-            },
-            "advisor_note_internal": "用户画像分析中。建议采用标准的专业顾问方式，平衡风险与收益。",
-            "key_concerns": ["资产配置", "风险管理"],
-            "recommended_approach": "专业、温和、平衡的沟通方式"
+            "risk_tolerance": "moderate",
+            "decision_style": "data_driven",
+            "sentiment": "neutral",
+            "liquidity_anxiety": "medium",
+            "confidence_score": 0.5,
+            "loss_aversion": "medium",
+            "financial_literacy": "intermediate",
+            "family_responsibility": "medium",
+            "planning_horizon": "medium",
+            "advisor_note": "用户画像分析中。建议采用标准的专业顾问方式，平衡风险与收益。",
+            "key_concerns": ["资产配置", "风险管理"]
         }
 
     async def _update_cognition_insights(self, user_id: int, analysis: dict[str, Any]) -> None:
-        """Update UserCognition table with psychological insights"""
+        """Update UserCognition table with psychological insights - updated for new structure"""
         try:
             async for session in get_db_session():
                 # Get or create UserCognition record
@@ -354,34 +432,41 @@ class InsightService:
                     cognition = UserCognition(user_id=user_id)
                     session.add(cognition)
                 
-                # Update risk profile
-                risk_profile_data = analysis.get("risk_profile", {})
-                if risk_profile_data:
-                    if not cognition.risk_profile:
-                        cognition.risk_profile = {}
-                    
-                    cognition.risk_profile.update({
-                        "tolerance": risk_profile_data.get("tolerance"),
-                        "decision_style": risk_profile_data.get("decision_style"),
-                        "confidence_level": risk_profile_data.get("confidence_level"),
-                        "current_sentiment": analysis.get("current_sentiment"),
-                        "last_analysis": datetime.utcnow().isoformat()
-                    })
-                    
-                    # Merge psychological traits
-                    psychological_traits = analysis.get("psychological_traits", {})
-                    if psychological_traits:
-                        cognition.risk_profile.update(psychological_traits)
+                # Update risk profile with new flattened structure
+                if not cognition.risk_profile:
+                    cognition.risk_profile = {}
                 
-                # Update advisor note (internal strategy)
-                advisor_note = analysis.get("advisor_note_internal")
+                # Store all psychological traits in risk_profile
+                updated_fields = {
+                    "tolerance": analysis.get("risk_tolerance"),
+                    "decision_style": analysis.get("decision_style"),
+                    "sentiment": analysis.get("sentiment"),
+                    "liquidity_anxiety": analysis.get("liquidity_anxiety"),
+                    "confidence_score": analysis.get("confidence_score", 0.5),
+                    "loss_aversion": analysis.get("loss_aversion"),
+                    "financial_literacy": analysis.get("financial_literacy"),
+                    "family_responsibility": analysis.get("family_responsibility"),
+                    "planning_horizon": analysis.get("planning_horizon"),
+                    "last_analysis": datetime.utcnow().isoformat()
+                }
+                
+                cognition.risk_profile.update(updated_fields)
+                
+                # Update advisor note (direct mapping from new structure)
+                advisor_note = analysis.get("advisor_note")
                 if advisor_note:
                     cognition.advisor_note = advisor_note
                 
                 cognition.updated_at = datetime.utcnow()
                 
                 await session.commit()
-                logger.info(f"Updated cognition insights for user {user_id}")
+                
+                # ✅ Enhanced logging to track complete update
+                logger.info(f"✅ INSIGHT_UPDATE: Updated complete risk_profile for user {user_id}")
+                logger.info(f"✅ INSIGHT_UPDATE: Fields updated: {list(updated_fields.keys())}")
+                logger.info(f"✅ INSIGHT_UPDATE: Values: tolerance={updated_fields.get('tolerance')}, "
+                           f"sentiment={updated_fields.get('sentiment')}, "
+                           f"liquidity_anxiety={updated_fields.get('liquidity_anxiety')}")
                 break
                 
         except Exception as e:
@@ -390,7 +475,7 @@ class InsightService:
     
     async def _extract_and_store_key_memories(self, user_id: int, messages: list[ChatMessage]) -> None:
         """
-        Phase 4: Extract key life events and constraints from conversation
+        Phase 4: Extract key life events using LLM Semantic Analysis
         Store them in L3 Vector Memory for long-term recall
         """
         try:
@@ -398,69 +483,163 @@ class InsightService:
             
             memory_service = get_memory_service()
             
-            # Analyze recent messages for key memories
+            # Prepare conversation context
             user_messages = [msg.content for msg in messages if msg.role == MessageRole.USER]
-            all_text = " ".join(user_messages[-10:])  # Last 10 user messages
+            if not user_messages:
+                return
             
-            # Detect key life events and constraints
-            key_events = []
+            conversation_text = "\n".join(user_messages[-10:])  # Analyze last 10 messages
             
-            # Family health issues
-            if any(keyword in all_text for keyword in ["生病", "住院", "手术", "治疗", "病情"]):
-                key_events.append({
-                    "content": f"用户提到家人健康问题，可能需要流动性资金应对医疗支出。时间: {datetime.utcnow().strftime('%Y-%m-%d')}",
-                    "category": "health_concern",
-                    "tags": ["family", "health", "liquidity"]
-                })
+            # Use LLM for semantic extraction if available, otherwise fallback to keyword matching
+            if self.has_real_openai_key and self.llm:
+                memories = await self._extract_memories_with_llm(conversation_text)
+            else:
+                memories = self._extract_memories_fallback(conversation_text)
             
-            # Major life plans
-            if any(keyword in all_text for keyword in ["买房", "购房", "换房", "学区房"]):
-                key_events.append({
-                    "content": f"用户计划购买房产，需要大额资金准备。时间: {datetime.utcnow().strftime('%Y-%m-%d')}",
-                    "category": "major_purchase",
-                    "tags": ["real_estate", "planning", "liquidity"]
-                })
-            
-            if any(keyword in all_text for keyword in ["退休", "养老", "退休金"]):
-                key_events.append({
-                    "content": f"用户关注退休规划，需要长期稳健投资策略。时间: {datetime.utcnow().strftime('%Y-%m-%d')}",
-                    "category": "retirement_planning",
-                    "tags": ["retirement", "long_term", "conservative"]
-                })
-            
-            if any(keyword in all_text for keyword in ["孩子", "教育", "学费", "留学"]):
-                key_events.append({
-                    "content": f"用户关注子女教育，需要预留教育资金。时间: {datetime.utcnow().strftime('%Y-%m-%d')}",
-                    "category": "education_planning",
-                    "tags": ["education", "family", "planning"]
-                })
-            
-            # Financial constraints
-            if any(keyword in all_text for keyword in ["房贷", "负债", "还款", "压力大"]):
-                key_events.append({
-                    "content": f"用户有房贷或债务压力，需要保守的投资策略和充足的流动性。时间: {datetime.utcnow().strftime('%Y-%m-%d')}",
-                    "category": "debt_constraint",
-                    "tags": ["debt", "constraint", "conservative"]
-                })
-            
-            # Store key memories
-            for event in key_events:
+            # Store extracted memories with new fields
+            for mem in memories:
                 await memory_service.add_memory(
                     user_id=user_id,
-                    text=event["content"],
+                    text=mem["content"],
                     metadata={
-                        "category": event["category"],
-                        "tags": event["tags"],
-                        "source": "insight_analysis",
+                        "category": mem.get("category", "general"),
+                        "tags": mem.get("tags", []),
+                        "timeline": mem.get("timeline"),  # New field
+                        "importance": mem.get("importance", "medium"),  # New field
+                        "source": "llm_insight_extraction" if self.has_real_openai_key else "keyword_extraction",
                         "timestamp": datetime.utcnow().isoformat()
                     }
                 )
             
-            if key_events:
-                logger.info(f"Stored {len(key_events)} key memories for user {user_id}")
+            if memories:
+                logger.info(f"Extracted and stored {len(memories)} memories for user {user_id}")
             
         except Exception as e:
             logger.error(f"Error extracting and storing key memories: {e}")
+    
+    async def _extract_memories_with_llm(self, conversation_text: str) -> list[dict[str, Any]]:
+        """Extract key memories using LLM semantic analysis - updated for new structure"""
+        
+        # Load prompts from YAML configuration
+        system_prompt = prompt_manager.render(
+            category="insight",
+            filename="memory_extraction",
+            key="system_instruction"
+        )
+        
+        user_prompt = prompt_manager.render(
+            category="insight",
+            filename="memory_extraction",
+            key="user_instruction",
+            conversation_text=conversation_text
+        )
+
+        try:
+            # Call LLM for memory extraction
+            messages_for_llm = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            
+            response = await self.llm.ainvoke(messages_for_llm)
+            response_text = response.content
+            
+            # Parse JSON response - handle markdown code blocks
+            cleaned_json = response_text.strip()
+            if "```json" in cleaned_json:
+                json_start = cleaned_json.find("```json") + 7
+                json_end = cleaned_json.find("```", json_start)
+                cleaned_json = cleaned_json[json_start:json_end].strip()
+            elif "```" in cleaned_json:
+                json_start = cleaned_json.find("```") + 3
+                json_end = cleaned_json.find("```", json_start)
+                cleaned_json = cleaned_json[json_start:json_end].strip()
+            
+            memories = json.loads(cleaned_json)
+            
+            # Validate structure
+            if not isinstance(memories, list):
+                logger.warning(f"LLM returned non-list response: {type(memories)}")
+                return []
+            
+            # Validate each memory has required fields and add defaults for new fields
+            valid_memories = []
+            for mem in memories:
+                if isinstance(mem, dict) and "content" in mem:
+                    valid_memories.append({
+                        "content": mem["content"],
+                        "category": mem.get("category", "general"),
+                        "timeline": mem.get("timeline"),  # New field
+                        "importance": mem.get("importance", "medium"),  # New field
+                        "tags": mem.get("tags", [])
+                    })
+            
+            logger.info(f"LLM extracted {len(valid_memories)} valid memories")
+            return valid_memories
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse LLM memory extraction response: {e}")
+            logger.error(f"Response text: {response_text}")
+            return []
+        except Exception as e:
+            logger.error(f"Error in LLM memory extraction: {e}")
+            return []
+    
+    def _extract_memories_fallback(self, conversation_text: str) -> list[dict[str, Any]]:
+        """Fallback keyword-based memory extraction for development/testing - updated with new fields"""
+        
+        memories = []
+        text_lower = conversation_text.lower()
+        
+        # Family health issues
+        if any(keyword in text_lower for keyword in ["生病", "住院", "手术", "治疗", "病情"]):
+            memories.append({
+                "content": f"用户提到家人健康问题，可能需要流动性资金应对医疗支出。时间: {datetime.utcnow().strftime('%Y-%m-%d')}",
+                "category": "health_concern",
+                "timeline": None,
+                "importance": "high",
+                "tags": ["family", "health", "liquidity"]
+            })
+        
+        # Major life plans
+        if any(keyword in text_lower for keyword in ["买房", "购房", "换房", "学区房"]):
+            memories.append({
+                "content": f"用户计划购买房产，需要大额资金准备。时间: {datetime.utcnow().strftime('%Y-%m-%d')}",
+                "category": "major_purchase",
+                "timeline": None,
+                "importance": "high",
+                "tags": ["real_estate", "planning", "liquidity"]
+            })
+        
+        if any(keyword in text_lower for keyword in ["退休", "养老", "退休金"]):
+            memories.append({
+                "content": f"用户关注退休规划，需要长期稳健投资策略。时间: {datetime.utcnow().strftime('%Y-%m-%d')}",
+                "category": "retirement_planning",
+                "timeline": None,
+                "importance": "medium",
+                "tags": ["retirement", "long_term", "conservative"]
+            })
+        
+        if any(keyword in text_lower for keyword in ["孩子", "教育", "学费", "留学"]):
+            memories.append({
+                "content": f"用户关注子女教育，需要预留教育资金。时间: {datetime.utcnow().strftime('%Y-%m-%d')}",
+                "category": "education_planning",
+                "timeline": None,
+                "importance": "medium",
+                "tags": ["education", "family", "planning"]
+            })
+        
+        # Financial constraints
+        if any(keyword in text_lower for keyword in ["房贷", "负债", "还款", "压力大"]):
+            memories.append({
+                "content": f"用户有房贷或债务压力，需要保守的投资策略和充足的流动性。时间: {datetime.utcnow().strftime('%Y-%m-%d')}",
+                "category": "debt_constraint",
+                "timeline": None,
+                "importance": "high",
+                "tags": ["debt", "constraint", "conservative"]
+            })
+        
+        return memories
 
     async def get_advisor_strategy(self, user_id: int) -> str | None:
         """

@@ -612,7 +612,12 @@ class AssetExtractionService:
             if collection_status_changed:
                 from sqlalchemy.orm.attributes import flag_modified
                 flag_modified(cognition, 'collection_status')
-                logger.info(f"Flagged collection_status as modified for SQLAlchemy")
+                logger.info(f"✅ COGNITION_UPDATE: Flagged collection_status as modified for SQLAlchemy")
+                
+                # ✅ FIXED: Use await for async flush
+                session.add(cognition)
+                await session.flush()  # Force immediate write to ensure change is recognized
+                logger.info(f"✅ COGNITION_UPDATE: Flushed cognition changes to database")
             
             logger.info(f"Final collection_status after update: {cognition.collection_status}")
         else:
@@ -631,6 +636,19 @@ class AssetExtractionService:
         
         logger.info(f"Updating UserProfile for user {user_id} with risk_profile: {risk_profile}")
         
+        # CRITICAL FIX: Check if user exists first to avoid foreign key constraint error
+        from app.models.user import User
+        user_statement = select(User).where(User.id == user_id)
+        user_result = await session.execute(user_statement)
+        user_exists = user_result.scalar_one_or_none()
+        
+        if not user_exists:
+            logger.error(f"❌ PROFILE_UPDATE_BLOCKED: User {user_id} does not exist in database")
+            logger.error("This is likely a test using a non-existent user ID")
+            logger.error("Available users can be checked with: SELECT id, phone FROM user LIMIT 10")
+            # ✅ FIX: Raise exception instead of silent return to surface the issue
+            raise ValueError(f"User {user_id} does not exist - cannot update UserProfile")
+        
         # Get or create UserProfile record
         profile_statement = select(UserProfile).where(UserProfile.user_id == user_id)
         profile_result = await session.execute(profile_statement)
@@ -640,8 +658,8 @@ class AssetExtractionService:
         has_updates = False
         
         if not profile:
-            # FIXED: Create profile if we have ANY useful field (not just all required fields)
-            # Use sensible defaults for required fields if not provided
+            # Create profile with "unknown" for missing required fields
+            # This allows profile creation even when some info is not yet extracted
             age_range = risk_profile.get("age_range")
             family_structure = risk_profile.get("family_structure")
             risk_preference = risk_profile.get("tolerance")
@@ -649,25 +667,31 @@ class AssetExtractionService:
             income_range = risk_profile.get("income_range")
             monthly_expense = risk_profile.get("monthly_expense")
             
+            # ✅ FIX: Use "unknown" for missing required fields instead of fake defaults
+            # This is honest - we don't know the user's age/family structure yet
             # Create profile if we have at least one meaningful field
             if any([age_range, family_structure, risk_preference, occupation, income_range, monthly_expense]):
-                profile = UserProfile(
-                    user_id=user_id,
-                    age_range=age_range or "30-40",  # Default to common age range
-                    family_structure=family_structure or "single",  # Default to single
-                    risk_preference=risk_preference or "moderate",  # Default to moderate
-                    monthly_expense=monthly_expense,
-                    occupation=occupation,
-                    income_range=income_range
-                )
-                session.add(profile)
-                has_updates = True
-                logger.info(f"Created new UserProfile for user {user_id} with defaults for missing required fields")
-                logger.info(f"  - age_range: {profile.age_range} {'(default)' if not age_range else ''}")
-                logger.info(f"  - family_structure: {profile.family_structure} {'(default)' if not family_structure else ''}")
-                logger.info(f"  - risk_preference: {profile.risk_preference} {'(default)' if not risk_preference else ''}")
-                logger.info(f"  - occupation: {occupation}")
-                logger.info(f"  - income_range: {income_range}")
+                try:
+                    profile = UserProfile(
+                        user_id=user_id,
+                        age_range=age_range or "unknown",  # ✅ Use "unknown" instead of "30-40"
+                        family_structure=family_structure or "unknown",  # ✅ Use "unknown" instead of "single"
+                        risk_preference=risk_preference or "unknown",  # ✅ Use "unknown" instead of "moderate"
+                        monthly_expense=monthly_expense,
+                        occupation=occupation,
+                        income_range=income_range
+                    )
+                    session.add(profile)
+                    has_updates = True
+                    logger.info(f"Created new UserProfile for user {user_id}")
+                    logger.info(f"  - age_range: {profile.age_range} {'(unknown - not yet provided)' if not age_range else ''}")
+                    logger.info(f"  - family_structure: {profile.family_structure} {'(unknown - not yet provided)' if not family_structure else ''}")
+                    logger.info(f"  - risk_preference: {profile.risk_preference} {'(unknown - not yet provided)' if not risk_preference else ''}")
+                    logger.info(f"  - occupation: {occupation}")
+                    logger.info(f"  - income_range: {income_range}")
+                except Exception as e:
+                    logger.error(f"Failed to create UserProfile for user {user_id}: {e}")
+                    return
             else:
                 logger.info(f"Skipping UserProfile creation - no useful fields provided")
         else:
@@ -704,6 +728,8 @@ class AssetExtractionService:
         
         if has_updates:
             logger.info(f"UserProfile changes will be committed for user {user_id}")
+        else:
+            logger.info(f"No UserProfile updates needed for user {user_id}")
 
     async def get_extraction_summary(self, user_id: int) -> dict[str, Any]:
         """Get summary of extracted information for a user"""

@@ -163,8 +163,23 @@ class RecommendationService:
             return []
 
     def _map_risk_to_category(self, risk_type: str) -> str | None:
-        """Map risk type to commercial product category"""
+        """
+        Map risk type to commercial product category
+        
+        Updated to support Standard & Poor's 4-Quadrant Model risk types:
+        - sp_spending_insufficient: Liquid funds (要花的钱) -> Cash/Money Market
+        - sp_life_insufficient: Insurance (保命的钱) -> Life/Health Insurance
+        - sp_growth_insufficient: Growth investments (生钱的钱) -> Stocks/Funds
+        - sp_preservation_insufficient: Preservation investments (保本升值的钱) -> Bonds/Fixed Income
+        """
         risk_to_category = {
+            # Standard & Poor's 4-Quadrant Model risk types (NEW)
+            "sp_spending_insufficient": "investment",  # High-liquidity products (money market, cash management)
+            "sp_life_insufficient": "insurance",  # Life protection (insurance products)
+            "sp_growth_insufficient": "broker",  # Growth investments (stocks, funds, equity)
+            "sp_preservation_insufficient": "investment",  # Preservation (bonds, fixed income, stable returns)
+            
+            # Legacy risk types (backward compatibility)
             "HIGH_RE_CONCENTRATION": "broker",
             "LIQUIDITY_CRISIS": "investment",
             "INSURANCE_GAP": "insurance",

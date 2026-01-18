@@ -4,8 +4,15 @@ Handles long-term unstructured memory with semantic search using local BGE embed
 """
 
 import logging
+import os
 from datetime import datetime
 from typing import Any
+
+# CRITICAL: Force offline mode for HuggingFace
+# These environment variables must be set BEFORE importing HuggingFaceEmbeddings
+# to prevent the library from trying to check for model updates online
+os.environ['HF_HUB_OFFLINE'] = '1'
+os.environ['TRANSFORMERS_OFFLINE'] = '1'
 
 from langchain_huggingface import HuggingFaceEmbeddings
 import sqlalchemy as sa
@@ -30,21 +37,53 @@ class MemoryService:
     
     def __init__(self):
         """
-        Initialize memory service with local BGE embeddings.
-        Uses CPU for inference to avoid GPU setup complexity in Docker.
+        Initialize memory service with lazy loading of BGE embeddings.
+        Model will be loaded on first use to avoid blocking service startup.
         """
-        try:
-            # Initialize local BGE embeddings (BAAI/bge-large-zh-v1.5, 1024 dimensions)
-            # Use CPU to avoid complex GPU setup in Docker, it's fast enough for embeddings
-            self.embeddings = HuggingFaceEmbeddings(
-                model_name=settings.EMBEDDING_MODEL_NAME,
-                model_kwargs={'device': 'cpu'},
-                encode_kwargs={'normalize_embeddings': True}
-            )
-            logger.info(f"Initialized local BGE embeddings: {settings.EMBEDDING_MODEL_NAME}")
-        except Exception as e:
-            logger.error(f"Failed to initialize BGE embeddings: {e}")
-            self.embeddings = None
+        self._embeddings = None  # Lazy initialization
+        self._model_loading = False
+        self._model_load_failed = False
+        
+        # Log initialization mode
+        if os.getenv('HF_HUB_OFFLINE') == '1':
+            logger.info("MemoryService initialized in OFFLINE mode (using cached BGE model)")
+        else:
+            logger.info("MemoryService initialized (BGE model will load on first use)")
+    
+    @property
+    def embeddings(self):
+        """
+        Lazy loading of embedding model.
+        Model is loaded on first access to avoid blocking service startup.
+        """
+        if self._embeddings is None and not self._model_load_failed and not self._model_loading:
+            self._model_loading = True
+            try:
+                # Check if offline mode is enabled
+                offline_mode = os.getenv('HF_HUB_OFFLINE') == '1'
+                if offline_mode:
+                    logger.info("Loading BGE model in OFFLINE mode (using local cache)")
+                else:
+                    logger.info(f"Loading embedding model: {settings.EMBEDDING_MODEL_NAME}")
+                    logger.info("This may take a few seconds on first use...")
+                
+                # Initialize local BGE embeddings (BAAI/bge-large-zh-v1.5, 1024 dimensions)
+                # Use CPU to avoid complex GPU setup in Docker, it's fast enough for embeddings
+                self._embeddings = HuggingFaceEmbeddings(
+                    model_name=settings.EMBEDDING_MODEL_NAME,
+                    model_kwargs={'device': 'cpu'},
+                    encode_kwargs={'normalize_embeddings': True}
+                )
+                logger.info(f"✅ Embedding model loaded successfully: {settings.EMBEDDING_MODEL_NAME}")
+            except Exception as e:
+                logger.error(f"❌ Failed to load embedding model: {e}")
+                logger.warning("⚠️  Vector memory features will be disabled")
+                logger.warning("⚠️  Tip: Set HF_ENDPOINT=https://hf-mirror.com in .env to use mirror")
+                self._model_load_failed = True
+            finally:
+                self._model_loading = False
+        
+        return self._embeddings
     
     async def add_memory(
         self, 
@@ -122,36 +161,38 @@ class MemoryService:
             
             # Perform cosine similarity search using pgvector
             async for session in get_db_session():
-                # Use pgvector's cosine distance operator (<=>)
-                # Lower distance = higher similarity
-                # We use 1 - distance to get similarity score
-                # Convert embedding list to string format for pgvector
+                # Use parameterized query to prevent SQL injection
+                # Convert embedding list to PostgreSQL array format
                 embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
                 
-                # Use raw SQL with proper parameter binding for asyncpg
-                from sqlalchemy import bindparam
-                query = text("""
+                # Use SQLAlchemy text() with bound parameters for safety
+                # Note: PostgreSQL uses $1, $2 for positional parameters with asyncpg
+                sql_query = text("""
                     SELECT 
                         id,
                         user_id,
                         content,
                         metadata,
                         created_at,
-                        1 - (embedding <=> :embedding_param::vector) as similarity
+                        1 - (embedding <=> CAST(:embedding_vector AS vector)) as similarity
                     FROM vector_memory
-                    WHERE user_id = :user_id_param
+                    WHERE user_id = :user_id
                         AND embedding IS NOT NULL
-                        AND 1 - (embedding <=> :embedding_param::vector) >= :threshold_param
-                    ORDER BY embedding <=> :embedding_param::vector
-                    LIMIT :limit_param
-                """).bindparams(
-                    bindparam('embedding_param', value=embedding_str, type_=sa.String),
-                    bindparam('user_id_param', value=user_id, type_=sa.Integer),
-                    bindparam('threshold_param', value=similarity_threshold, type_=sa.Float),
-                    bindparam('limit_param', value=limit, type_=sa.Integer)
-                )
+                        AND 1 - (embedding <=> CAST(:embedding_vector AS vector)) >= :threshold
+                    ORDER BY embedding <=> CAST(:embedding_vector AS vector)
+                    LIMIT :limit_val
+                """)
                 
-                result = await session.execute(query)
+                # Execute with bound parameters
+                result = await session.execute(
+                    sql_query,
+                    {
+                        "embedding_vector": embedding_str,
+                        "user_id": user_id,
+                        "threshold": similarity_threshold,
+                        "limit_val": limit
+                    }
+                )
                 
                 rows = result.fetchall()
                 
@@ -174,14 +215,19 @@ class MemoryService:
             return await self._fallback_keyword_search(user_id, query_text, limit)
     
     async def _generate_embedding(self, text: str) -> list[float] | None:
-        """Generate embedding vector for text using local BGE model"""
+        """
+        Generate embedding vector for text using local BGE model
+        
+        Note: HuggingFaceEmbeddings.embed_query is synchronous, but it's fast enough
+        that we don't need to run it in a thread pool for typical use cases.
+        """
         try:
             if not self.embeddings:
                 logger.warning("Embeddings not initialized")
                 return None
             
             # Generate embedding using local BGE model
-            # Note: HuggingFaceEmbeddings.embed_query is synchronous
+            # This is a synchronous call but typically completes in < 100ms
             embedding = self.embeddings.embed_query(text)
             return embedding
             

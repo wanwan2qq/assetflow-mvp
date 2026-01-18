@@ -113,7 +113,20 @@ async def websocket_chat(websocket: WebSocket, user_id: int, token: str = Query(
             "timestamp": "2024-01-01T00:00:00Z",
         }
         try:
-            await websocket.send_text(json.dumps(welcome_msg, ensure_ascii=False))
+            # Ensure proper UTF-8 encoding for WebSocket messages
+            welcome_json = json.dumps(welcome_msg, ensure_ascii=False)
+            # Validate UTF-8 encoding before sending
+            welcome_json.encode('utf-8')
+            await websocket.send_text(welcome_json)
+        except UnicodeEncodeError as e:
+            logger.error(f"UTF-8 encoding error in welcome message: {e}")
+            # Fallback with ASCII-safe message
+            fallback_msg = {
+                "type": "system",
+                "content": "欢迎使用AssetFlow！我是您的AI资产配置顾问。",
+                "timestamp": "2024-01-01T00:00:00Z",
+            }
+            await websocket.send_text(json.dumps(fallback_msg, ensure_ascii=True))
         except Exception as e:
             logger.error(f"Failed to send welcome message: {e}")
             return
@@ -151,7 +164,19 @@ async def websocket_chat(websocket: WebSocket, user_id: int, token: str = Query(
                     "timestamp": "2024-01-01T00:00:00Z",
                 }
                 try:
-                    await websocket.send_text(json.dumps(typing_msg, ensure_ascii=False))
+                    typing_json = json.dumps(typing_msg, ensure_ascii=False)
+                    # Validate UTF-8 encoding before sending
+                    typing_json.encode('utf-8')
+                    await websocket.send_text(typing_json)
+                except UnicodeEncodeError as e:
+                    logger.error(f"UTF-8 encoding error in typing message: {e}")
+                    # Fallback with ASCII-safe message
+                    fallback_typing = {
+                        "type": "typing",
+                        "content": "AI正在思考中...",
+                        "timestamp": "2024-01-01T00:00:00Z",
+                    }
+                    await websocket.send_text(json.dumps(fallback_typing, ensure_ascii=True))
                 except Exception as e:
                     logger.error(f"Failed to send typing indicator: {e}")
                     break
@@ -164,16 +189,33 @@ async def websocket_chat(websocket: WebSocket, user_id: int, token: str = Query(
                     if chunk.strip():
                         response_chunks.append(chunk)
 
-                        # Send streaming chunk
+                        # Send streaming chunk with UTF-8 validation
                         chunk_msg = {
                             "type": "chunk",
                             "content": chunk,
                             "timestamp": "2024-01-01T00:00:00Z",
                         }
                         try:
-                            await websocket.send_text(
-                                json.dumps(chunk_msg, ensure_ascii=False)
-                            )
+                            chunk_json = json.dumps(chunk_msg, ensure_ascii=False)
+                            # Validate UTF-8 encoding before sending
+                            chunk_json.encode('utf-8')
+                            await websocket.send_text(chunk_json)
+                        except UnicodeEncodeError as e:
+                            logger.error(f"UTF-8 encoding error in chunk: {e}")
+                            # Try to clean the chunk content
+                            try:
+                                # Remove problematic characters and retry
+                                clean_chunk = chunk.encode('utf-8', errors='replace').decode('utf-8')
+                                clean_msg = {
+                                    "type": "chunk",
+                                    "content": clean_chunk,
+                                    "timestamp": "2024-01-01T00:00:00Z",
+                                }
+                                await websocket.send_text(json.dumps(clean_msg, ensure_ascii=False))
+                            except Exception as clean_error:
+                                logger.error(f"Failed to send cleaned chunk: {clean_error}")
+                                # Skip this chunk to prevent connection break
+                                continue
                         except Exception as e:
                             logger.error(f"Failed to send chunk: {e}")
                             break
@@ -191,7 +233,32 @@ async def websocket_chat(websocket: WebSocket, user_id: int, token: str = Query(
                     "timestamp": "2024-01-01T00:00:00Z",
                 }
                 try:
-                    await websocket.send_text(json.dumps(complete_msg, ensure_ascii=False))
+                    complete_json = json.dumps(complete_msg, ensure_ascii=False)
+                    # Validate UTF-8 encoding before sending
+                    complete_json.encode('utf-8')
+                    await websocket.send_text(complete_json)
+                except UnicodeEncodeError as e:
+                    logger.error(f"UTF-8 encoding error in complete message: {e}")
+                    # Try to clean the response content
+                    try:
+                        clean_response = full_response.encode('utf-8', errors='replace').decode('utf-8')
+                        clean_msg = {
+                            "type": "complete",
+                            "content": clean_response,
+                            "ui_components": [comp.model_dump() for comp in ui_components],
+                            "timestamp": "2024-01-01T00:00:00Z",
+                        }
+                        await websocket.send_text(json.dumps(clean_msg, ensure_ascii=False))
+                    except Exception as clean_error:
+                        logger.error(f"Failed to send cleaned complete message: {clean_error}")
+                        # Send minimal fallback message
+                        fallback_msg = {
+                            "type": "complete",
+                            "content": "回复内容包含特殊字符，已自动处理。",
+                            "ui_components": [],
+                            "timestamp": "2024-01-01T00:00:00Z",
+                        }
+                        await websocket.send_text(json.dumps(fallback_msg, ensure_ascii=True))
                 except Exception as e:
                     logger.error(f"Failed to send complete message: {e}")
                     break
@@ -203,7 +270,13 @@ async def websocket_chat(websocket: WebSocket, user_id: int, token: str = Query(
                     "timestamp": "2024-01-01T00:00:00Z",
                 }
                 try:
-                    await websocket.send_text(json.dumps(error_msg, ensure_ascii=False))
+                    error_json = json.dumps(error_msg, ensure_ascii=False)
+                    # Validate UTF-8 encoding before sending
+                    error_json.encode('utf-8')
+                    await websocket.send_text(error_json)
+                except UnicodeEncodeError as e:
+                    logger.error(f"UTF-8 encoding error in error message: {e}")
+                    await websocket.send_text(json.dumps(error_msg, ensure_ascii=True))
                 except Exception as send_error:
                     logger.error(f"Failed to send error message: {send_error}")
                     break
@@ -216,7 +289,19 @@ async def websocket_chat(websocket: WebSocket, user_id: int, token: str = Query(
                     "timestamp": "2024-01-01T00:00:00Z",
                 }
                 try:
-                    await websocket.send_text(json.dumps(error_msg, ensure_ascii=False))
+                    error_json = json.dumps(error_msg, ensure_ascii=False)
+                    # Validate UTF-8 encoding before sending
+                    error_json.encode('utf-8')
+                    await websocket.send_text(error_json)
+                except UnicodeEncodeError as e:
+                    logger.error(f"UTF-8 encoding error in error message: {e}")
+                    # Fallback with ASCII-safe message
+                    fallback_error = {
+                        "type": "error",
+                        "content": "处理消息时出现错误",
+                        "timestamp": "2024-01-01T00:00:00Z",
+                    }
+                    await websocket.send_text(json.dumps(fallback_error, ensure_ascii=True))
                 except Exception as send_error:
                     logger.error(f"Failed to send error message: {send_error}")
                     break

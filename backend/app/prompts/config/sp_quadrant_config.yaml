@@ -1,0 +1,111 @@
+# Standard & Poor's 4-Quadrant Model Configuration
+# 标准普尔四象限模型配置
+
+quadrants:
+  preservation_money:  # 保本升值的钱 (10%)
+    name: "保本升值的钱"
+    percentage: 0.10
+    characteristics: ["保本", "低风险", "稳定收益", "高流动性"]
+    asset_types:
+      - subtype: "money_fund"
+        risk_level: "low"
+        liquidity: "high"
+        examples: ["余额宝", "零钱通", "货币基金"]
+      - subtype: "bank_product"
+        risk_level: "low"
+        liquidity: "medium"
+        examples: ["银行理财", "固收理财", "R1/R2理财"]
+      - subtype: "fixed_deposit"
+        risk_level: "low"
+        liquidity: "low"
+        examples: ["定期存款", "大额存单"]
+      - subtype: "bond"
+        risk_level: "low"
+        liquidity: "medium"
+        examples: ["国债", "企业债", "逆回购"]
+
+  spending_money:  # 要花的钱 (20%)
+    name: "要花的钱"
+    percentage: 0.20
+    characteristics: ["高流动性", "随时可用", "应急资金"]
+    calculation_formula: "3-6个月生活费 + 月度债务还款总额"
+    components:
+      - "monthly_expense_multiplier": [3, 6]  # 3-6倍月支出
+      - "monthly_debt_payments": "sum_of_all_monthly_payments"
+
+  growth_money:  # 生钱的钱 (30%)
+    name: "生钱的钱"
+    percentage: 0.30
+    characteristics: ["高收益", "高风险", "长期投资"]
+    asset_types:
+      - subtype: "stock"
+        risk_level: "high"
+        liquidity: "high"
+        examples: ["A股", "港股", "美股", "个股"]
+      - subtype: "equity_fund"
+        risk_level: "high"
+        liquidity: "high"
+        examples: ["股票基金", "指数基金", "ETF"]
+      - subtype: "crypto"
+        risk_level: "high"
+        liquidity: "high"
+        examples: ["比特币", "以太坊", "加密货币"]
+
+  protection_money:  # 保命的钱 (40%)
+    name: "保命的钱"
+    percentage: 0.40
+    characteristics: ["长期保障", "风险对冲", "稳健增值"]
+    asset_types:
+      - subtype: "balanced_fund"
+        risk_level: "medium"
+        liquidity: "medium"
+        examples: ["混合基金", "平衡基金"]
+      - subtype: "bond_fund"
+        risk_level: "medium"
+        liquidity: "medium"
+        examples: ["债券基金", "可转债基金"]
+      - subtype: "property_fund"
+        risk_level: "medium"
+        liquidity: "low"
+        examples: ["房地产基金", "REITs"]
+      - subtype: "insurance_investment"
+        risk_level: "low"
+        liquidity: "low"
+        examples: ["年金险", "万能险", "投连险"]
+
+# Risk level definitions
+risk_levels:
+  low:
+    description: "低风险"
+    volatility_range: [0, 0.05]
+    expected_return_range: [0.02, 0.06]
+    suitable_for: ["保守型投资者", "临近退休人群"]
+  
+  medium:
+    description: "中等风险"
+    volatility_range: [0.05, 0.15]
+    expected_return_range: [0.06, 0.12]
+    suitable_for: ["平衡型投资者", "中年投资者"]
+  
+  high:
+    description: "高风险"
+    volatility_range: [0.15, 0.30]
+    expected_return_range: [0.12, 0.25]
+    suitable_for: ["激进型投资者", "年轻投资者"]
+
+# Liquidity definitions
+liquidity_levels:
+  high:
+    description: "高流动性"
+    redemption_time: "T+0到T+1"
+    examples: ["活期存款", "货币基金", "股票"]
+  
+  medium:
+    description: "中等流动性"
+    redemption_time: "T+1到T+7"
+    examples: ["债券基金", "银行理财"]
+  
+  low:
+    description: "低流动性"
+    redemption_time: "T+7以上或有锁定期"
+    examples: ["定期存款", "房地产", "保险产品"]

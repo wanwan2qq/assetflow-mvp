@@ -1,0 +1,40 @@
+# Asset Type Mapping Configuration
+# 资产类型映射配置
+
+asset_types:
+  real_estate:
+    keywords: ["房产", "房子", "住房", "小区", "楼盘", "公寓", "别墅", "商铺"]
+    required_fields: ["location", "area"]
+    optional_fields: ["property_type", "purchase_date", "mortgage_info"]
+  
+  cash:
+    keywords: ["现金", "存款", "银行", "储蓄", "活期", "定期"]
+    required_fields: ["amount"]
+    optional_fields: ["bank_name", "account_type", "interest_rate"]
+  
+  investment:
+    keywords: ["股票", "基金", "投资", "理财", "证券", "债券"]
+    required_fields: ["subtype", "risk_level"]
+    optional_fields: ["platform", "purchase_date", "expected_return"]
+  
+  insurance:
+    keywords: ["保险", "重疾险", "意外险", "寿险", "医疗险"]
+    required_fields: ["coverage_amount", "insurance_type"]
+    optional_fields: ["premium", "beneficiary", "term"]
+  
+  liability:
+    keywords: ["贷款", "房贷", "车贷", "债务", "信用卡", "借款"]
+    required_fields: ["total_amount"]
+    optional_fields: ["monthly_payment", "interest_rate", "remaining_term"]
+
+# Chinese amount conversion patterns
+amount_patterns:
+  "万": 10000
+  "千万": 10000000
+  "亿": 100000000
+  "k": 1000
+  "万元": 10000
+  "万块": 10000
+
+# Fuzzy amount indicators
+fuzzy_indicators: ["大概", "约", "差不多", "左右", "around", "about", "approximately"]

@@ -23,6 +23,7 @@ class RiskLevel(str, Enum):
     CONSERVATIVE = "conservative"  # 保守型
     MODERATE = "moderate"  # 稳健型
     AGGRESSIVE = "aggressive"  # 激进型
+    UNKNOWN = "unknown"  # 未知
 
 
 class User(SQLModel, table=True):
@@ -65,7 +66,7 @@ class UserProfile(SQLModel, table=True):
     @classmethod
     def validate_age_range(cls, v: str) -> str:
         """验证年龄段格式"""
-        valid_ranges = ["20-30", "30-40", "40-50", "50-60", "60+"]
+        valid_ranges = ["20-30", "30-40", "40-50", "50-60", "60+", "unknown"]  # ✅ Added "unknown"
         if v not in valid_ranges:
             raise ValueError(f"年龄段必须是以下之一: {', '.join(valid_ranges)}")
         return v
@@ -80,6 +81,7 @@ class UserProfile(SQLModel, table=True):
             "married_with_kids",
             "divorced",
             "widowed",
+            "unknown",  # ✅ Added "unknown"
         ]
         if v not in valid_structures:
             raise ValueError(f"家庭结构必须是以下之一: {', '.join(valid_structures)}")

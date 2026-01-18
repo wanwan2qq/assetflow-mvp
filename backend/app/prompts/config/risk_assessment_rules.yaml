@@ -1,0 +1,130 @@
+# Risk Assessment Rules Configuration
+# 风险评估规则配置
+
+# User profile risk assessment
+user_risk_profiles:
+  conservative:
+    keywords: ["保守", "稳健", "安全", "低风险", "保本"]
+    risk_tolerance: 0.1
+    recommended_allocation:
+      preservation_money: 0.20
+      spending_money: 0.30
+      protection_money: 0.45
+      growth_money: 0.05
+  
+  moderate:
+    keywords: ["平衡", "中等", "适中", "稳健增长"]
+    risk_tolerance: 0.5
+    recommended_allocation:
+      preservation_money: 0.10
+      spending_money: 0.20
+      protection_money: 0.40
+      growth_money: 0.30
+  
+  aggressive:
+    keywords: ["激进", "高风险", "进取", "高收益", "投机"]
+    risk_tolerance: 0.9
+    recommended_allocation:
+      preservation_money: 0.05
+      spending_money: 0.15
+      protection_money: 0.30
+      growth_money: 0.50
+
+# Age-based risk adjustment
+age_risk_adjustment:
+  "20-30":
+    risk_multiplier: 1.2
+    growth_money_boost: 0.1
+    description: "年轻人可承受更高风险"
+  
+  "30-40":
+    risk_multiplier: 1.0
+    growth_money_boost: 0.0
+    description: "标准风险配置"
+  
+  "40-50":
+    risk_multiplier: 0.8
+    growth_money_boost: -0.05
+    description: "中年人适度降低风险"
+  
+  "50-60":
+    risk_multiplier: 0.6
+    growth_money_boost: -0.1
+    description: "临近退休降低风险"
+  
+  "60+":
+    risk_multiplier: 0.4
+    growth_money_boost: -0.15
+    description: "退休人群保守配置"
+
+# Family structure risk adjustment
+family_risk_adjustment:
+  single:
+    risk_multiplier: 1.1
+    description: "单身可承受更高风险"
+  
+  married:
+    risk_multiplier: 0.9
+    description: "已婚适度降低风险"
+  
+  married_with_kids:
+    risk_multiplier: 0.7
+    spending_money_boost: 0.05
+    description: "有孩子家庭需要更多流动资金"
+  
+  divorced:
+    risk_multiplier: 0.8
+    description: "离异人群适度保守"
+  
+  widowed:
+    risk_multiplier: 0.6
+    description: "丧偶人群保守配置"
+
+# Income-based risk adjustment
+income_risk_adjustment:
+  low_income:
+    threshold: 100000  # 年收入10万以下
+    risk_multiplier: 0.7
+    spending_money_boost: 0.1
+    description: "低收入群体需要更多应急资金"
+  
+  medium_income:
+    threshold: 500000  # 年收入10-50万
+    risk_multiplier: 1.0
+    description: "中等收入标准配置"
+  
+  high_income:
+    threshold: 1000000  # 年收入50-100万
+    risk_multiplier: 1.2
+    description: "高收入可承受更高风险"
+  
+  ultra_high_income:
+    threshold: float('inf')  # 年收入100万以上
+    risk_multiplier: 1.3
+    description: "超高收入群体"
+
+# Dynamic risk factors
+market_conditions:
+  bull_market:
+    growth_money_boost: 0.05
+    description: "牛市可适度增加成长型资产"
+  
+  bear_market:
+    growth_money_boost: -0.05
+    preservation_money_boost: 0.05
+    description: "熊市增加保本资产"
+  
+  volatile_market:
+    spending_money_boost: 0.03
+    description: "市场波动期增加流动资金"
+
+# Asset correlation rules
+correlation_rules:
+  high_correlation_warning:
+    threshold: 0.8
+    message: "资产相关性过高，建议分散投资"
+  
+  concentration_risk:
+    single_asset_threshold: 0.3
+    single_category_threshold: 0.6
+    message: "单一资产或类别占比过高"
