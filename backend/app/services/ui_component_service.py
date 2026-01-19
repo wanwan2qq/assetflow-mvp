@@ -25,6 +25,8 @@ class UIComponentType(str, Enum):
     VALUATION_CARD = "VALUATION_CARD"
     ACTION_CARD = "ACTION_CARD"
     PORTFOLIO_CHART = "PORTFOLIO_CHART"
+    ASSET_CARD = "ASSET_CARD"  # For displaying single asset details
+    PRODUCT_CARD = "PRODUCT_CARD"  # Specialized commercial product card
 
 
 class UIComponent(BaseModel):
@@ -54,6 +56,42 @@ class ActionCardData(BaseModel):
     priority: str = Field(description="Priority level (high, medium, low)")
     contact_info: dict[str, Any] | None = Field(
         default=None, description="Contact information"
+    )
+    reason: str | None = Field(
+        default=None, description="Why this action is recommended"
+    )
+    provider_info: str | None = Field(
+        default=None, description="Broker/Company name providing the service"
+    )
+
+
+class AssetCardData(BaseModel):
+    """Data structure for asset card"""
+
+    name: str = Field(description="Asset name")
+    value: float = Field(description="Asset value")
+    type: str = Field(description="Asset type (real_estate, cash, investment, etc.)")
+    risk_level: str | None = Field(default=None, description="Risk level of the asset")
+    tags: list[str] = Field(default=[], description="Asset tags/categories")
+    privacy_mode: bool = Field(default=False, description="Whether to mask exact values")
+
+
+class ProductCardData(BaseModel):
+    """Data structure for commercial product card"""
+
+    name: str = Field(description="Product name")
+    provider: str = Field(description="Service provider name")
+    category: str = Field(description="Product category")
+    description: str = Field(description="Product description")
+    price: str | None = Field(default=None, description="Product price or fee structure")
+    roi: str | None = Field(default=None, description="Expected ROI or benefit")
+    buy_now_link: str | None = Field(default=None, description="Purchase/contact link")
+    contact_info: dict[str, Any] | None = Field(
+        default=None, description="Contact information"
+    )
+    priority: str = Field(description="Priority level (high, medium, low)")
+    reason: str | None = Field(
+        default=None, description="Why this product is recommended"
     )
 
 
@@ -104,6 +142,8 @@ class UIComponentService:
         description: str,
         priority: str = "medium",
         contact_info: dict[str, Any] | None = None,
+        reason: str | None = None,
+        provider_info: str | None = None,
     ) -> str:
         """Generate action card UI component tag"""
         try:
@@ -113,6 +153,8 @@ class UIComponentService:
                 description=description,
                 priority=priority,
                 contact_info=contact_info,
+                reason=reason,
+                provider_info=provider_info,
             )
 
             # Convert to JSON string for embedding, escape quotes for HTML attribute
@@ -161,6 +203,215 @@ class UIComponentService:
         except Exception as e:
             logger.error(f"Error generating portfolio chart: {e}")
             return ""
+
+    def generate_asset_card(
+        self,
+        name: str,
+        value: float,
+        asset_type: str,
+        risk_level: str | None = None,
+        tags: list[str] | None = None,
+        privacy_mode: bool = False,
+    ) -> str:
+        """Generate asset card widget"""
+        try:
+            # Mask value if privacy mode is enabled
+            display_value = value
+            if privacy_mode:
+                # Mask exact value, show only magnitude
+                if value >= 10000000:  # >= 1000万
+                    display_value = 10000000  # Show as "1000万+"
+                elif value >= 1000000:  # >= 100万
+                    display_value = 1000000  # Show as "100万+"
+                elif value >= 100000:  # >= 10万
+                    display_value = 100000  # Show as "10万+"
+
+            card_data = AssetCardData(
+                name=name,
+                value=display_value,
+                type=asset_type,
+                risk_level=risk_level,
+                tags=tags or [],
+                privacy_mode=privacy_mode,
+            )
+
+            # Convert to JSON string for embedding, escape quotes for HTML attribute
+            data_json = json.dumps(card_data.model_dump(), ensure_ascii=False)
+            escaped_json = data_json.replace('"', "&quot;")
+            return f'<WIDGET:ASSET_CARD data="{escaped_json}">'
+
+        except Exception as e:
+            logger.error(f"Error generating asset card: {e}")
+            return ""
+
+    def generate_product_card(
+        self,
+        name: str,
+        provider: str,
+        category: str,
+        description: str,
+        priority: str = "medium",
+        price: str | None = None,
+        roi: str | None = None,
+        buy_now_link: str | None = None,
+        contact_info: dict[str, Any] | None = None,
+        reason: str | None = None,
+    ) -> str:
+        """Generate commercial product card widget"""
+        try:
+            card_data = ProductCardData(
+                name=name,
+                provider=provider,
+                category=category,
+                description=description,
+                price=price,
+                roi=roi,
+                buy_now_link=buy_now_link,
+                contact_info=contact_info,
+                priority=priority,
+                reason=reason,
+            )
+
+            # Convert to JSON string for embedding, escape quotes for HTML attribute
+            data_json = json.dumps(card_data.model_dump(), ensure_ascii=False)
+            escaped_json = data_json.replace('"', "&quot;")
+            return f'<WIDGET:PRODUCT_CARD data="{escaped_json}">'
+
+        except Exception as e:
+            logger.error(f"Error generating product card: {e}")
+            return ""
+
+    def generate_components_from_context(
+        self, 
+        chat_context: dict[str, Any],
+        user_profile: dict[str, Any] | None = None,
+        privacy_mode: bool = False
+    ) -> list[str]:
+        """
+        Generate UI components based on chat context data instead of regex matching.
+        This is the new deterministic approach replacing regex-based triggers.
+        
+        Args:
+            chat_context: Contains extracted_assets, portfolio_analysis, recommendations, etc.
+            user_profile: User profile information
+            privacy_mode: Whether to mask exact values in cards
+            
+        Returns:
+            List of UI component strings ready for embedding
+        """
+        components = []
+        
+        try:
+            # 1. Generate VALUATION_CARD for real estate assets (most important for user experience)
+            extracted_assets = chat_context.get("extracted_assets", [])
+            real_estate_assets = [
+                asset for asset in extracted_assets 
+                if asset.get("asset_type") == "real_estate" and asset.get("value", 0) > 0
+            ]
+            
+            if real_estate_assets:
+                # Generate valuation card for the most recent/valuable property
+                asset = max(real_estate_assets, key=lambda x: x.get("value", 0))
+                valuation_card = self.generate_valuation_card(
+                    price=asset.get("value", 0),
+                    area=asset.get("area", 100),  # Default area if not provided
+                    location=asset.get("location", asset.get("name", "房产")),
+                    confidence=asset.get("confidence", 0.8)
+                )
+                if valuation_card:
+                    components.append(valuation_card)
+            
+            # 2. Generate PRODUCT_CARD or ACTION_CARD from recommendations
+            recommendations = chat_context.get("recommendations", [])
+            for rec in recommendations:
+                if isinstance(rec, dict):
+                    # Check if this is a commercial product recommendation
+                    if rec.get("product_info") and rec.get("buy_now_link"):
+                        # Generate PRODUCT_CARD for commercial products
+                        product_card = self.generate_product_card(
+                            name=rec.get("name", "推荐产品"),
+                            provider=rec.get("provider", ""),
+                            category=rec.get("category", ""),
+                            description=rec.get("description", ""),
+                            priority=rec.get("priority", "medium"),
+                            price=rec.get("price"),
+                            roi=rec.get("roi"),
+                            buy_now_link=rec.get("buy_now_link"),
+                            contact_info=rec.get("contact_info"),
+                            reason=rec.get("reason")
+                        )
+                        if product_card:
+                            components.append(product_card)
+                    else:
+                        # Generate ACTION_CARD for general recommendations
+                        action_card = self.generate_action_card(
+                            action_type=rec.get("type", "general"),
+                            title=rec.get("title", "建议"),
+                            description=rec.get("description", ""),
+                            priority=rec.get("priority", "medium"),
+                            contact_info=rec.get("contact_info"),
+                            reason=rec.get("reason"),
+                            provider_info=rec.get("provider")
+                        )
+                        if action_card:
+                            components.append(action_card)
+            
+            # 3. Generate ASSET_CARD for newly added assets
+            newly_added_asset = chat_context.get("newly_added_asset")
+            if newly_added_asset:
+                asset_card = self.generate_asset_card(
+                    name=newly_added_asset.get("name", "新资产"),
+                    value=newly_added_asset.get("value", 0),
+                    asset_type=newly_added_asset.get("asset_type", "unknown"),
+                    risk_level=newly_added_asset.get("risk_level"),
+                    tags=newly_added_asset.get("tags", []),
+                    privacy_mode=privacy_mode
+                )
+                if asset_card:
+                    components.append(asset_card)
+            
+            # 4. Generate PORTFOLIO_CHART if portfolio analysis is fresh
+            portfolio_analysis = chat_context.get("portfolio_analysis")
+            if portfolio_analysis and portfolio_analysis.get("is_fresh", False):
+                if len(extracted_assets) >= 2:
+                    # Convert dict assets to UserAsset-like objects for chart generation
+                    asset_objects = []
+                    for asset_data in extracted_assets:
+                        # Create a simple object with the required attributes
+                        class AssetObj:
+                            def __init__(self, data):
+                                self.name = data.get("name", "")
+                                self.value = data.get("value", 0)
+                                self.asset_type = type('AssetType', (), {
+                                    'value': data.get("asset_type", "unknown")
+                                })()
+                        
+                        if asset_data.get("value", 0) > 0:
+                            asset_objects.append(AssetObj(asset_data))
+                    
+                    if asset_objects:
+                        portfolio_chart = self.generate_portfolio_chart(asset_objects)
+                        if portfolio_chart:
+                            components.append(portfolio_chart)
+            
+            # 5. Generate ACTION_CARDs from portfolio analysis risk warnings
+            if portfolio_analysis:
+                risk_warnings = portfolio_analysis.get("risk_warnings", [])
+                for warning in risk_warnings:
+                    action_card = self.generate_action_card(
+                        action_type=warning.get("type", "risk"),
+                        title=warning.get("title", "风险提醒"),
+                        description=warning.get("recommendation", ""),
+                        priority=self._map_severity_to_priority(warning.get("severity", "medium")),
+                        reason=warning.get("description")
+                    )
+                    if action_card:
+                        components.append(action_card)
+                        
+        except Exception as e:
+            logger.error(f"Error generating components from context: {e}")
+            
+        return components
 
     def generate_action_cards_from_risks(
         self,
@@ -230,6 +481,12 @@ class UIComponentService:
             "diversification": "broker",
             "liquidity": "investment",
             "insurance": "insurance",
+            # Add mappings for portfolio analyzer risk types
+            "real_estate_concentration": "broker",  # Real estate concentration -> broker services
+            "liquidity_risk": "investment",         # Liquidity risk -> investment products
+            "insurance_gap": "insurance",           # Insurance gap -> insurance products
+            "debt_burden": "loan",                  # Debt burden -> loan products
+            "investment_risk": "investment",        # Investment risk -> investment products
         }
 
         target_category = risk_to_category.get(risk_type, "consulting")

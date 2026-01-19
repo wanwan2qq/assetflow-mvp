@@ -1274,48 +1274,60 @@ class ChatAgent:
     async def _enhance_response_with_ui_components(
         self, response: str, context: ChatContext, user_id: int
     ) -> str:
-        """Enhance AI response with appropriate UI components"""
+        """Enhance AI response with appropriate UI components using context-based approach"""
         enhanced_response = response
         ui_components = []
 
         try:
-            # Check if we should add valuation card
-            if self.ui_service.should_generate_valuation_card(
-                response, context.extracted_assets
-            ):
-                valuation_card = await self._generate_valuation_card(context)
-                if valuation_card:
-                    ui_components.append(valuation_card)
+            # Get user profile for privacy settings and personalization
+            user_profile = None
+            privacy_mode = False  # TODO: Get from user settings when implemented
+            
+            if hasattr(context, 'user_profile') and context.user_profile:
+                user_profile = context.user_profile
 
-            # Check if we should add portfolio analysis and chart
-            if (
-                context.current_stage == "analysis"
-                and len(context.extracted_assets) >= 2
-            ):
-                analysis_summary = await self._generate_portfolio_analysis(
-                    context, user_id
-                )
-                # REMOVED: Double-response bug fix - Let AI persona control the conversation flow
-                # The analysis_summary text was causing duplicate portfolio summaries
-                # if analysis_summary:
-                #     enhanced_response += f"\n\n{analysis_summary}"
+            # CRITICAL FIX: Trigger portfolio analysis if we have assets but no analysis yet
+            if (len(context.extracted_assets) >= 2 and 
+                (not hasattr(context, 'portfolio_analysis') or not context.portfolio_analysis)):
+                logger.info(f"🔄 Triggering portfolio analysis for user {user_id} with {len(context.extracted_assets)} assets")
+                portfolio_analysis_text = await self._generate_portfolio_analysis(context, user_id)
+                if portfolio_analysis_text:
+                    logger.info(f"✅ Portfolio analysis completed for user {user_id}")
+                else:
+                    logger.warning(f"⚠️ Portfolio analysis failed for user {user_id}")
 
-                # Add portfolio chart if appropriate
-                if self.ui_service.should_generate_portfolio_chart(
-                    response, context.extracted_assets, context.current_stage
-                ):
-                    portfolio_chart = await self._generate_portfolio_chart(context)
-                    if portfolio_chart:
-                        ui_components.append(portfolio_chart)
+            # Prepare context data for component generation
+            chat_context_data = {
+                "extracted_assets": context.extracted_assets,
+                "portfolio_analysis": getattr(context, 'portfolio_analysis', None),
+                "current_stage": context.current_stage,
+                "recommendations": [],  # Will be populated below
+                "newly_added_asset": getattr(context, 'newly_added_asset', None),
+            }
 
-            # Generate action cards based on portfolio analysis
+            # Get recommendations from portfolio analysis if available
+            if hasattr(context, 'portfolio_analysis') and context.portfolio_analysis:
+                # Get commercial product recommendations for risks
+                risk_warnings = context.portfolio_analysis.get("risk_warnings", [])
+                if risk_warnings:
+                    recommendations = await self.recommendation_service.get_recommendations_for_risks(
+                        risk_warnings, user_profile, limit=5
+                    )
+                    chat_context_data["recommendations"] = recommendations
+                    logger.info(f"🎯 Generated {len(recommendations)} recommendations for user {user_id}")
+                    
+                    # Mark portfolio analysis as fresh for chart generation
+                    chat_context_data["portfolio_analysis"]["is_fresh"] = True
+
+            # Generate components using the new context-based approach
+            ui_components = self.ui_service.generate_components_from_context(
+                chat_context_data, user_profile, privacy_mode
+            )
+            
+            logger.info(f"🎨 Generated {len(ui_components)} UI components for user {user_id}")
+
+            # Track action card generation for analytics
             if context.portfolio_analysis and context.current_stage == "analysis":
-                action_cards = await self.recommendation_service.generate_action_cards_for_portfolio(
-                    context.portfolio_analysis
-                )
-                ui_components.extend(action_cards)
-
-                # Track action card generation for analytics
                 try:
                     risk_warnings = context.portfolio_analysis.get("risk_warnings", [])
                     for warning in risk_warnings[:3]:  # Track top 3 risks
@@ -1333,17 +1345,35 @@ class ChatAgent:
                 except Exception as e:
                     logger.warning(f"Failed to track action card generation: {e}")
 
-            elif self.ui_service.should_generate_action_cards(
-                response, context.current_stage
-            ):
-                # Fallback to response-based action card generation
-                action_cards = await self._generate_fallback_action_cards(response)
-                ui_components.extend(action_cards)
+            # Fallback to legacy approach if no components generated and conditions met
+            if not ui_components:
+                logger.info(f"🔄 No components from context-based approach, trying legacy methods for user {user_id}")
+                
+                # Check if we should add portfolio chart (legacy)
+                if self.ui_service.should_generate_portfolio_chart(
+                    response, context.extracted_assets, context.current_stage
+                ):
+                    portfolio_chart = await self._generate_portfolio_chart(context)
+                    if portfolio_chart:
+                        ui_components.append(portfolio_chart)
+
+                # Generate action cards (legacy) - only if no other components
+                if self.ui_service.should_generate_action_cards(
+                    response, context.current_stage
+                ):
+                    action_cards = await self._generate_fallback_action_cards(response)
+                    ui_components.extend(action_cards)
+
+                # REMOVED: Legacy valuation card generation to avoid duplication
+                # The new context-based method now handles VALUATION_CARD generation
 
             # Enhance response with all UI components
             enhanced_response = self.ui_service.enhance_response_with_components(
                 enhanced_response, ui_components
             )
+            
+            if len(ui_components) > 0:
+                logger.info(f"✅ Enhanced response with {len(ui_components)} UI components for user {user_id}")
 
         except Exception as e:
             logger.error(f"Error enhancing response with UI components: {e}")

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -12,6 +13,8 @@ import '../../../../core/models/user.dart';
 import '../../../../shared/widgets/valuation_card.dart';
 import '../../../../shared/widgets/action_card.dart';
 import '../../../../shared/widgets/portfolio_chart.dart';
+import '../../../../shared/widgets/asset_card.dart';
+import '../../../../shared/widgets/product_card.dart';
 
 // UTF-8 safe logging utility
 String _safeLogString(String text, {int maxLength = 100}) {
@@ -175,6 +178,50 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
               title: data['title'] as String? ?? '资产配置分析',
               onTap: () {
                 _sendMessage('请详细解释我的资产配置');
+              },
+            ),
+          );
+          break;
+          
+        case 'ASSET_CARD':
+          final data = widgetData.data;
+          widgets.add(
+            AssetCard(
+              name: data['name'] as String? ?? '未知资产',
+              value: (data['value'] as num?)?.toDouble() ?? 0,
+              assetType: data['type'] as String? ?? 'unknown',
+              riskLevel: data['risk_level'] as String?,
+              tags: (data['tags'] as List<dynamic>?)?.cast<String>() ?? [],
+              privacyMode: data['privacy_mode'] as bool? ?? false,
+              onTap: () {
+                _sendMessage('告诉我更多关于${data['name'] ?? '这个资产'}的信息');
+              },
+              onEdit: () {
+                _sendMessage('我想修改${data['name'] ?? '这个资产'}的信息');
+              },
+            ),
+          );
+          break;
+
+        case 'PRODUCT_CARD':
+          final data = widgetData.data;
+          widgets.add(
+            ProductCard(
+              name: data['name'] as String? ?? '推荐产品',
+              provider: data['provider'] as String? ?? '未知服务商',
+              category: data['category'] as String? ?? 'general',
+              description: data['description'] as String? ?? '',
+              price: data['price'] as String?,
+              roi: data['roi'] as String?,
+              buyNowLink: data['buy_now_link'] as String?,
+              contactInfo: data['contact_info'] as Map<String, dynamic>?,
+              priority: data['priority'] as String? ?? 'medium',
+              reason: data['reason'] as String?,
+              onTap: () {
+                _sendMessage('我对${data['name'] ?? '这个产品'}感兴趣，请提供更多信息');
+              },
+              onContact: () {
+                _sendMessage('我想联系${data['provider'] ?? '服务商'}咨询${data['name'] ?? '这个产品'}');
               },
             ),
           );
@@ -505,88 +552,487 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
   }
 
   List<Widget>? _parseEmbeddedWidgets(String text) {
+    print('🔍 DEBUG: Starting widget parsing');
+    print('🔍 DEBUG: Message length: ${text.length}');
+    print('🔍 DEBUG: Message preview: ${text.substring(0, math.min(200, text.length))}...');
+    
+    // Check for any widget tags
+    if (text.contains('<WIDGET:')) {
+      print('✅ DEBUG: Found WIDGET tags in message');
+      
+      // Count different widget types
+      int valuationCount = '<WIDGET:VALUATION_CARD'.allMatches(text).length;
+      int productCount = '<WIDGET:PRODUCT_CARD'.allMatches(text).length;
+      int actionCount = '<WIDGET:ACTION_CARD'.allMatches(text).length;
+      int portfolioCount = '<WIDGET:PORTFOLIO_CHART'.allMatches(text).length;
+      int assetCount = '<WIDGET:ASSET_CARD'.allMatches(text).length;
+      
+      print('🔍 DEBUG: Widget counts:');
+      print('  VALUATION_CARD: $valuationCount');
+      print('  PRODUCT_CARD: $productCount');
+      print('  ACTION_CARD: $actionCount');
+      print('  PORTFOLIO_CHART: $portfolioCount');
+      print('  ASSET_CARD: $assetCount');
+    } else {
+      print('❌ DEBUG: No WIDGET tags found in message');
+      return null;
+    }
+    
     final widgets = <Widget>[];
     
-    if (text.contains('<WIDGET:VALUATION_CARD>')) {
-      widgets.add(
-        ValuationCard(
-          propertyName: '北京天通苑',
-          estimatedValue: 4500000,
-          pricePerSqm: '3.8万/平',
-          onConfirm: () {
-            _sendMessage('确认估值 450万');
-          },
-          onEdit: () {
-            _sendMessage('我想调整估值');
-          },
-        ),
-      );
+    // Parse VALUATION_CARD with JSON data
+    if (text.contains('<WIDGET:VALUATION_CARD')) {
+      print('🔍 DEBUG: Processing VALUATION_CARD');
+      
+      // Try multiple regex patterns to handle different escaping levels
+      final patterns = [
+        RegExp(r'<WIDGET:VALUATION_CARD data="([^"]*)"'),           // Normal escaping
+        RegExp(r'<WIDGET:VALUATION_CARD data=\\"([^\\"]*)\\""'),    // WebSocket escaping
+        RegExp(r'<WIDGET:VALUATION_CARD data=\\\"([^\\\"]*)\\\""'), // Double escaping
+      ];
+      
+      RegExpMatch? match;
+      int patternIndex = -1;
+      
+      for (int i = 0; i < patterns.length; i++) {
+        match = patterns[i].firstMatch(text);
+        if (match != null) {
+          patternIndex = i;
+          print('🔍 DEBUG: Pattern ${i + 1} matched');
+          break;
+        }
+      }
+      
+      if (match != null) {
+        try {
+          var jsonStr = match.group(1) ?? '{}';
+          
+          // Apply appropriate decoding based on pattern
+          if (patternIndex == 0) {
+            // Normal HTML entity decoding
+            jsonStr = jsonStr
+              .replaceAll('&quot;', '"')  // HTML entity decoding
+              .replaceAll('\\"', '"');    // JSON escape decoding
+          } else if (patternIndex == 1) {
+            // WebSocket escaping - handle \" first, then &quot;
+            jsonStr = jsonStr
+              .replaceAll('\\&quot;', '"')  // WebSocket + HTML entity
+              .replaceAll('&quot;', '"')    // Remaining HTML entities
+              .replaceAll('\\"', '"');      // JSON escapes
+          } else {
+            // Double escaping
+            jsonStr = jsonStr
+              .replaceAll('\\\\&quot;', '"')  // Double escaped HTML entities
+              .replaceAll('\\&quot;', '"')    // Single escaped HTML entities
+              .replaceAll('&quot;', '"')      // HTML entities
+              .replaceAll('\\"', '"');        // JSON escapes
+          }
+          
+          print('🔍 DEBUG: VALUATION_CARD JSON (pattern ${patternIndex + 1}): ${jsonStr.substring(0, math.min(150, jsonStr.length))}...');
+          final data = json.decode(jsonStr) as Map<String, dynamic>;
+          
+          widgets.add(
+            ValuationCard(
+              propertyName: data['location'] as String? ?? '房产',
+              estimatedValue: (data['price'] as num?)?.toDouble() ?? 0,
+              pricePerSqm: data['area'] != null 
+                  ? '${((data['price_per_sqm'] as num?) ?? 0).toStringAsFixed(0)}元/平'
+                  : '未知',
+              onConfirm: () {
+                _sendMessage('确认估值 ${((data['price'] as num?)?.toDouble() ?? 0) / 10000}万');
+              },
+              onEdit: () {
+                _sendMessage('我想调整估值');
+              },
+            ),
+          );
+          print('✅ DEBUG: Successfully created VALUATION_CARD widget');
+        } catch (e) {
+          print('❌ DEBUG: Error parsing VALUATION_CARD data: $e');
+          print('❌ DEBUG: Raw JSON string: ${match.group(1)}');
+          // Fallback to simple valuation card
+          widgets.add(
+            ValuationCard(
+              propertyName: '房产估值',
+              estimatedValue: 0,
+              pricePerSqm: '解析失败',
+              onConfirm: () => _sendMessage('确认估值'),
+              onEdit: () => _sendMessage('编辑估值'),
+            ),
+          );
+        }
+      } else if (text.contains('<WIDGET:VALUATION_CARD>')) {
+        print('🔍 DEBUG: Found simple VALUATION_CARD tag');
+        // Simple tag without data (legacy support)
+        widgets.add(
+          ValuationCard(
+            propertyName: '北京天通苑',
+            estimatedValue: 4500000,
+            pricePerSqm: '3.8万/平',
+            onConfirm: () => _sendMessage('确认估值 450万'),
+            onEdit: () => _sendMessage('我想调整估值'),
+          ),
+        );
+      } else {
+        print('❌ DEBUG: VALUATION_CARD tag found but no pattern matched');
+      }
     }
     
-    if (text.contains('<WIDGET:ACTION_CARD>')) {
-      widgets.add(
-        ActionCard(
-          type: ActionCardType.warning,
-          title: '流动性风险警告',
-          description: '您的现金储备相对较低，建议增加应急资金至6个月支出',
-          onTap: () {
-            _sendMessage('告诉我更多关于流动性风险的信息');
-          },
-        ),
-      );
+    // Parse ACTION_CARD with JSON data - handle multiple cards
+    if (text.contains('<WIDGET:ACTION_CARD')) {
+      print('🔍 DEBUG: Processing ACTION_CARD');
+      final matches = RegExp(r'<WIDGET:ACTION_CARD data="([^"]*)"').allMatches(text);
+      print('🔍 DEBUG: Found ${matches.length} ACTION_CARD matches');
+      
+      for (final match in matches) {
+        try {
+          final jsonStr = match.group(1)
+            ?.replaceAll('&quot;', '"')  // HTML entity decoding
+            ?.replaceAll('\\"', '"')     // JSON escape decoding
+            ?? '{}';
+          print('🔍 DEBUG: ACTION_CARD JSON: ${jsonStr.substring(0, math.min(100, jsonStr.length))}...');
+          
+          final data = json.decode(jsonStr) as Map<String, dynamic>;
+          
+          widgets.add(
+            ActionCard(
+              type: _parseActionCardType(data['type'] as String?),
+              title: data['title'] as String? ?? '操作建议',
+              description: data['description'] as String? ?? '',
+              onTap: () {
+                _sendMessage('告诉我更多关于${data['title'] ?? '这个建议'}的信息');
+              },
+            ),
+          );
+          print('✅ DEBUG: Successfully created ACTION_CARD widget: ${data['title']}');
+        } catch (e) {
+          print('❌ DEBUG: Error parsing ACTION_CARD data: $e');
+          print('❌ DEBUG: Raw JSON string: ${match.group(1)}');
+          // Fallback to simple action card
+          widgets.add(
+            ActionCard(
+              type: ActionCardType.warning,
+              title: '操作建议',
+              description: '为您推荐的操作',
+              onTap: () {
+                _sendMessage('告诉我更多关于这个建议的信息');
+              },
+            ),
+          );
+        }
+      }
+      
+      if (matches.isEmpty && text.contains('<WIDGET:ACTION_CARD>')) {
+        print('🔍 DEBUG: Found simple ACTION_CARD tag');
+        // Simple tag without data (legacy support)
+        widgets.add(
+          ActionCard(
+            type: ActionCardType.warning,
+            title: '流动性风险警告',
+            description: '您的现金储备相对较低，建议增加应急资金至6个月支出',
+            onTap: () {
+              _sendMessage('告诉我更多关于流动性风险的信息');
+            },
+          ),
+        );
+      }
     }
     
-    if (text.contains('<WIDGET:PORTFOLIO_CHART>')) {
-      widgets.add(
-        PortfolioChart(
-          assets: [
-            UserAsset(
-              id: 1,
-              userId: 1,
-              assetType: AssetType.realEstate,
-              name: '房产',
-              value: 4500000,
-              isConfirmed: true,
+    // Parse PORTFOLIO_CHART with JSON data
+    if (text.contains('<WIDGET:PORTFOLIO_CHART')) {
+      print('🔍 DEBUG: Processing PORTFOLIO_CHART');
+      final match = RegExp(r'<WIDGET:PORTFOLIO_CHART data="([^"]*)"').firstMatch(text);
+      if (match != null) {
+        try {
+          final jsonStr = match.group(1)
+            ?.replaceAll('&quot;', '"')  // HTML entity decoding
+            ?.replaceAll('\\"', '"')     // JSON escape decoding
+            ?? '{}';
+          print('🔍 DEBUG: PORTFOLIO_CHART JSON: ${jsonStr.substring(0, math.min(100, jsonStr.length))}...');
+          final data = json.decode(jsonStr) as Map<String, dynamic>;
+          
+          final assets = (data['assets'] as List<dynamic>?)?.map((assetData) {
+            return UserAsset(
+              id: assetData['id'] ?? 0,
+              userId: assetData['userId'] ?? 0,
+              assetType: _parseAssetType(assetData['type'] as String?),
+              name: assetData['name'] ?? '未知资产',
+              value: (assetData['value'] as num?)?.toDouble() ?? 0,
+              isConfirmed: assetData['isConfirmed'] ?? false,
               createdAt: DateTime.now(),
               updatedAt: DateTime.now(),
+            );
+          }).toList() ?? [];
+          
+          widgets.add(
+            PortfolioChart(
+              assets: assets,
+              title: data['title'] as String? ?? '资产配置分析',
+              onTap: () {
+                _sendMessage('请详细解释我的资产配置');
+              },
             ),
-            UserAsset(
-              id: 2,
-              userId: 1,
-              assetType: AssetType.cash,
-              name: '现金',
-              value: 800000,
-              isConfirmed: true,
-              createdAt: DateTime.now(),
-              updatedAt: DateTime.now(),
+          );
+          print('✅ DEBUG: Successfully created PORTFOLIO_CHART widget with ${assets.length} assets');
+        } catch (e) {
+          print('❌ DEBUG: Error parsing PORTFOLIO_CHART data: $e');
+          print('❌ DEBUG: Raw JSON string: ${match.group(1)}');
+          // Fallback to simple portfolio chart
+          widgets.add(
+            PortfolioChart(
+              assets: [
+                UserAsset(
+                  id: 1,
+                  userId: 1,
+                  assetType: AssetType.realEstate,
+                  name: '房产',
+                  value: 4500000,
+                  isConfirmed: true,
+                  createdAt: DateTime.now(),
+                  updatedAt: DateTime.now(),
+                ),
+                UserAsset(
+                  id: 2,
+                  userId: 1,
+                  assetType: AssetType.cash,
+                  name: '现金',
+                  value: 800000,
+                  isConfirmed: true,
+                  createdAt: DateTime.now(),
+                  updatedAt: DateTime.now(),
+                ),
+              ],
+              title: '资产配置分析',
+              onTap: () {
+                _sendMessage('请详细解释我的资产配置');
+              },
             ),
-            UserAsset(
-              id: 3,
-              userId: 1,
-              assetType: AssetType.investment,
-              name: '投资',
-              value: 500000,
-              isConfirmed: true,
-              createdAt: DateTime.now(),
-              updatedAt: DateTime.now(),
+          );
+        }
+      } else if (text.contains('<WIDGET:PORTFOLIO_CHART>')) {
+        print('🔍 DEBUG: Found simple PORTFOLIO_CHART tag');
+        // Simple tag without data (legacy support)
+        widgets.add(
+          PortfolioChart(
+            assets: [
+              UserAsset(
+                id: 1,
+                userId: 1,
+                assetType: AssetType.realEstate,
+                name: '房产',
+                value: 4500000,
+                isConfirmed: true,
+                createdAt: DateTime.now(),
+                updatedAt: DateTime.now(),
+              ),
+              UserAsset(
+                id: 2,
+                userId: 1,
+                assetType: AssetType.cash,
+                name: '现金',
+                value: 800000,
+                isConfirmed: true,
+                createdAt: DateTime.now(),
+                updatedAt: DateTime.now(),
+              ),
+              UserAsset(
+                id: 3,
+                userId: 1,
+                assetType: AssetType.investment,
+                name: '投资',
+                value: 500000,
+                isConfirmed: true,
+                createdAt: DateTime.now(),
+                updatedAt: DateTime.now(),
+              ),
+              UserAsset(
+                id: 4,
+                userId: 1,
+                assetType: AssetType.insurance,
+                name: '保险',
+                value: 200000,
+                isConfirmed: true,
+                createdAt: DateTime.now(),
+                updatedAt: DateTime.now(),
+              ),
+            ],
+            title: '您的资产配置分析',
+            onTap: () {
+              _sendMessage('请详细解释我的资产配置');
+            },
+          ),
+        );
+      }
+    }
+    
+    // Parse ASSET_CARD with JSON data
+    if (text.contains('<WIDGET:ASSET_CARD')) {
+      print('🔍 DEBUG: Processing ASSET_CARD');
+      final match = RegExp(r'<WIDGET:ASSET_CARD data="([^"]*)"').firstMatch(text);
+      if (match != null) {
+        try {
+          final jsonStr = match.group(1)
+            ?.replaceAll('&quot;', '"')  // HTML entity decoding
+            ?.replaceAll('\\"', '"')     // JSON escape decoding
+            ?? '{}';
+          print('🔍 DEBUG: ASSET_CARD JSON: ${jsonStr.substring(0, math.min(100, jsonStr.length))}...');
+          final data = json.decode(jsonStr) as Map<String, dynamic>;
+          
+          widgets.add(
+            AssetCard(
+              name: data['name'] as String? ?? '未知资产',
+              value: (data['value'] as num?)?.toDouble() ?? 0,
+              assetType: data['type'] as String? ?? 'unknown',
+              riskLevel: data['risk_level'] as String?,
+              tags: (data['tags'] as List<dynamic>?)?.cast<String>() ?? [],
+              privacyMode: data['privacy_mode'] as bool? ?? false,
+              onTap: () {
+                _sendMessage('告诉我更多关于${data['name'] ?? '这个资产'}的信息');
+              },
+              onEdit: () {
+                _sendMessage('我想修改${data['name'] ?? '这个资产'}的信息');
+              },
             ),
-            UserAsset(
-              id: 4,
-              userId: 1,
-              assetType: AssetType.insurance,
-              name: '保险',
-              value: 200000,
-              isConfirmed: true,
-              createdAt: DateTime.now(),
-              updatedAt: DateTime.now(),
+          );
+          print('✅ DEBUG: Successfully created ASSET_CARD widget: ${data['name']}');
+        } catch (e) {
+          print('❌ DEBUG: Error parsing ASSET_CARD data: $e');
+          print('❌ DEBUG: Raw JSON string: ${match.group(1)}');
+          // Fallback to simple asset card
+          widgets.add(
+            AssetCard(
+              name: '新增资产',
+              value: 0,
+              assetType: 'unknown',
+              onTap: () {
+                _sendMessage('告诉我更多关于这个资产的信息');
+              },
             ),
-          ],
-          title: '您的资产配置分析',
-          onTap: () {
-            _sendMessage('请详细解释我的资产配置');
-          },
-        ),
-      );
+          );
+        }
+      } else if (text.contains('<WIDGET:ASSET_CARD>')) {
+        print('🔍 DEBUG: Found simple ASSET_CARD tag');
+        // Simple tag without data
+        widgets.add(
+          AssetCard(
+            name: '新增资产',
+            value: 0,
+            assetType: 'unknown',
+            onTap: () {
+              _sendMessage('告诉我更多关于这个资产的信息');
+            },
+          ),
+        );
+      }
+    }
+
+    // Parse PRODUCT_CARD with JSON data - handle multiple cards
+    if (text.contains('<WIDGET:PRODUCT_CARD')) {
+      print('🔍 DEBUG: Processing PRODUCT_CARD');
+      
+      // Try multiple regex patterns to handle different escaping levels
+      final patterns = [
+        RegExp(r'<WIDGET:PRODUCT_CARD data="([^"]*)"'),           // Normal escaping
+        RegExp(r'<WIDGET:PRODUCT_CARD data=\\"([^\\"]*)\\""'),    // WebSocket escaping
+        RegExp(r'<WIDGET:PRODUCT_CARD data=\\\"([^\\\"]*)\\\""'), // Double escaping
+      ];
+      
+      int totalMatches = 0;
+      for (int patternIndex = 0; patternIndex < patterns.length; patternIndex++) {
+        final matches = patterns[patternIndex].allMatches(text);
+        if (matches.isNotEmpty) {
+          print('🔍 DEBUG: Pattern ${patternIndex + 1} found ${matches.length} PRODUCT_CARD matches');
+          totalMatches += matches.length;
+          
+          for (final match in matches) {
+            try {
+              var jsonStr = match.group(1) ?? '{}';
+              
+              // Apply appropriate decoding based on pattern
+              if (patternIndex == 0) {
+                jsonStr = jsonStr
+                  .replaceAll('&quot;', '"')  // HTML entity decoding
+                  .replaceAll('\\"', '"');    // JSON escape decoding
+              } else if (patternIndex == 1) {
+                jsonStr = jsonStr
+                  .replaceAll('\\&quot;', '"')  // WebSocket + HTML entity
+                  .replaceAll('&quot;', '"')    // Remaining HTML entities
+                  .replaceAll('\\"', '"');      // JSON escapes
+              } else {
+                jsonStr = jsonStr
+                  .replaceAll('\\\\&quot;', '"')  // Double escaped HTML entities
+                  .replaceAll('\\&quot;', '"')    // Single escaped HTML entities
+                  .replaceAll('&quot;', '"')      // HTML entities
+                  .replaceAll('\\"', '"');        // JSON escapes
+              }
+              
+              print('🔍 DEBUG: PRODUCT_CARD JSON: ${jsonStr.substring(0, math.min(150, jsonStr.length))}...');
+              
+              final data = json.decode(jsonStr) as Map<String, dynamic>;
+              
+              widgets.add(
+                ProductCard(
+                  name: data['name'] as String? ?? '推荐产品',
+                  provider: data['provider'] as String? ?? '未知服务商',
+                  category: data['category'] as String? ?? 'general',
+                  description: data['description'] as String? ?? '',
+                  price: data['price'] as String?,
+                  roi: data['roi'] as String?,
+                  buyNowLink: data['buy_now_link'] as String?,
+                  contactInfo: data['contact_info'] as Map<String, dynamic>?,
+                  priority: data['priority'] as String? ?? 'medium',
+                  reason: data['reason'] as String?,
+                  onTap: () {
+                    _sendMessage('我对${data['name'] ?? '这个产品'}感兴趣，请提供更多信息');
+                  },
+                  onContact: () {
+                    _sendMessage('我想联系${data['provider'] ?? '服务商'}咨询${data['name'] ?? '这个产品'}');
+                  },
+                ),
+              );
+              print('✅ DEBUG: Successfully created PRODUCT_CARD widget: ${data['name']}');
+            } catch (e) {
+              print('❌ DEBUG: Error parsing PRODUCT_CARD data: $e');
+              print('❌ DEBUG: Raw JSON string: ${match.group(1)}');
+              // Fallback to simple product card
+              widgets.add(
+                ProductCard(
+                  name: '推荐产品',
+                  provider: '服务商',
+                  category: 'general',
+                  description: '为您推荐的产品',
+                  onTap: () {
+                    _sendMessage('我对这个产品感兴趣');
+                  },
+                ),
+              );
+            }
+          }
+          break; // Found matches with this pattern, no need to try others
+        }
+      }
+      
+      if (totalMatches == 0 && text.contains('<WIDGET:PRODUCT_CARD>')) {
+        print('🔍 DEBUG: Found simple PRODUCT_CARD tag');
+        // Simple tag without data
+        widgets.add(
+          ProductCard(
+            name: '推荐产品',
+            provider: '服务商',
+            category: 'general',
+            description: '为您推荐的产品',
+            onTap: () {
+              _sendMessage('我对这个产品感兴趣');
+            },
+          ),
+        );
+      }
+    }
+    
+    print('🎯 DEBUG: Parsing completed');
+    print('🎯 DEBUG: Generated ${widgets.length} widgets');
+    for (int i = 0; i < widgets.length; i++) {
+      print('  ${i + 1}. ${widgets[i].runtimeType}');
     }
     
     return widgets.isNotEmpty ? widgets : null;

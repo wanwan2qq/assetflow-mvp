@@ -34,7 +34,7 @@ class RecommendationService:
         recommendations = []
 
         try:
-            async with get_db_session() as session:
+            async for session in get_db_session():
                 for warning in risk_warnings:
                     risk_type = warning.get("type", "")
                     category = self._map_risk_to_category(risk_type)
@@ -51,7 +51,7 @@ class RecommendationService:
                             recommendations.append(recommendation)
 
                 # Sort by priority and limit results
-                recommendations.sort(key=lambda x: x["priority_score"], reverse=True)
+                recommendations.sort(key=lambda x: x.get("priority_score", 0), reverse=True)
                 return recommendations[:limit]
 
         except Exception as e:
@@ -63,7 +63,7 @@ class RecommendationService:
     ) -> list[CommercialProduct]:
         """Get commercial products by category with user-specific filtering"""
         try:
-            async with get_db_session() as session:
+            async for session in get_db_session():
                 return await self._query_products_by_category(
                     session, category, user_profile, limit
                 )
@@ -83,7 +83,7 @@ class RecommendationService:
             risk_warnings = portfolio_analysis.get("risk_warnings", [])
 
             # Get commercial products for each risk
-            async with get_db_session() as session:
+            async for session in get_db_session():
                 for warning in risk_warnings:
                     risk_type = warning.get("type", "")
                     category = self._map_risk_to_category(risk_type)
@@ -103,6 +103,8 @@ class RecommendationService:
                                     warning.get("severity", "medium")
                                 ),
                                 contact_info=product.contact_info,
+                                reason=warning.get("description", "基于您的投资组合分析"),
+                                provider_info=product.provider,
                             )
                             action_cards.append(card)
                         else:
@@ -114,8 +116,10 @@ class RecommendationService:
                                 priority=self._map_severity_to_priority(
                                     warning.get("severity", "medium")
                                 ),
+                                reason=warning.get("description", "基于您的投资组合分析"),
                             )
                             action_cards.append(card)
+                break  # Exit the async generator loop
 
         except Exception as e:
             logger.error(f"Error generating action cards for portfolio: {e}")
@@ -179,6 +183,13 @@ class RecommendationService:
             "sp_growth_insufficient": "broker",  # Growth investments (stocks, funds, equity)
             "sp_preservation_insufficient": "investment",  # Preservation (bonds, fixed income, stable returns)
             
+            # Portfolio Analyzer risk types (ADDED)
+            "real_estate_concentration": "broker",  # Real estate concentration -> broker services
+            "liquidity_risk": "investment",         # Liquidity risk -> investment products
+            "insurance_gap": "insurance",           # Insurance gap -> insurance products
+            "debt_burden": "loan",                  # Debt burden -> loan products
+            "investment_risk": "investment",        # Investment risk -> investment products
+            
             # Legacy risk types (backward compatibility)
             "HIGH_RE_CONCENTRATION": "broker",
             "LIQUIDITY_CRISIS": "investment",
@@ -207,18 +218,57 @@ class RecommendationService:
         self, product: CommercialProduct, risk_warning: dict[str, Any]
     ) -> dict[str, Any]:
         """Create recommendation object from commercial product and risk warning"""
-        return {
-            "product_id": product.id,
-            "product_name": product.name,
-            "provider": product.provider,
+        # Determine if this should be a PRODUCT_CARD (has commercial info) or ACTION_CARD
+        has_commercial_info = bool(product.contact_info and product.provider)
+        
+        recommendation = {
+            "type": risk_warning.get("type", "general"),
+            "title": risk_warning.get("title", "推荐"),
             "description": product.description,
+            "priority": self._map_priority_to_level(product.priority),
+            "priority_score": product.priority,  # Add numeric score for sorting
+            "reason": risk_warning.get("recommendation", "基于您的风险分析"),
+            "provider": product.provider,
             "contact_info": product.contact_info,
             "category": product.category,
-            "risk_type": risk_warning.get("type", ""),
-            "risk_title": risk_warning.get("title", ""),
-            "priority_score": product.priority,
-            "recommendation_reason": risk_warning.get("recommendation", ""),
+            "name": product.name,
         }
+        
+        # Add commercial product specific fields if this is a commercial recommendation
+        if has_commercial_info:
+            recommendation.update({
+                "product_info": {
+                    "id": product.id,
+                    "name": product.name,
+                    "provider": product.provider,
+                    "category": product.category,
+                },
+                "buy_now_link": product.contact_info.get("website") or product.contact_info.get("phone"),
+                "price": product.contact_info.get("pricing", "请咨询"),
+                "roi": self._estimate_roi_for_category(product.category),
+            })
+        
+        return recommendation
+
+    def _map_priority_to_level(self, priority_score: int) -> str:
+        """Map numeric priority score to level string"""
+        if priority_score >= 80:
+            return "high"
+        elif priority_score >= 50:
+            return "medium"
+        else:
+            return "low"
+    
+    def _estimate_roi_for_category(self, category: str) -> str:
+        """Provide estimated ROI/benefit for different product categories"""
+        roi_mapping = {
+            "insurance": "风险保障覆盖",
+            "investment": "预期年化收益 5-8%",
+            "broker": "专业投资建议",
+            "loan": "优惠利率",
+            "consulting": "专业财务规划",
+        }
+        return roi_mapping.get(category, "专业服务")
 
     def _extract_user_tags(self, user_profile: UserProfile) -> list[str]:
         """Extract relevant tags from user profile for product matching"""

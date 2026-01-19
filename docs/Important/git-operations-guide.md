@@ -70,7 +70,7 @@ git add backend/app/         # 添加特定目录
 git add specific-file.py     # 添加特定文件
 
 # 提交更改
-git commit -m "feat: 聊天功能基本OK，仪表板效果完善；下一步待优化长期记忆能力"
+git commit -m "feat: 长期记忆功能优化基本完成，还有一些小bug待后期优化，下一步优化UI卡片"
 
 # 推送到远程分支
 git push origin feature/your-feature-name
