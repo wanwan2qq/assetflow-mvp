@@ -70,7 +70,7 @@ git add backend/app/         # 添加特定目录
 git add specific-file.py     # 添加特定文件
 
 # 提交更改
-git commit -m "feat: 长期记忆功能优化基本完成，还有一些小bug待后期优化，下一步优化UI卡片"
+git commit -m "feat: UI卡片功能实现，MVP基本功能实现。下一步进行大规模的系统重构，实现完整的家庭资产配置助手能力"
 
 # 推送到远程分支
 git push origin feature/your-feature-name

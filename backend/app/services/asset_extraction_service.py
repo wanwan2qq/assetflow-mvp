@@ -672,11 +672,23 @@ class AssetExtractionService:
             # Create profile if we have at least one meaningful field
             if any([age_range, family_structure, risk_preference, occupation, income_range, monthly_expense]):
                 try:
+                    # Map risk_preference string to RiskLevel enum
+                    from app.models.user import RiskLevel
+                    risk_level_mapping = {
+                        "conservative": RiskLevel.CONSERVATIVE,
+                        "moderate": RiskLevel.MODERATE,
+                        "aggressive": RiskLevel.AGGRESSIVE,
+                        "unknown": RiskLevel.UNKNOWN,
+                    }
+                    mapped_risk_preference = risk_level_mapping.get(
+                        risk_preference, RiskLevel.UNKNOWN
+                    ) if risk_preference else RiskLevel.UNKNOWN
+                    
                     profile = UserProfile(
                         user_id=user_id,
                         age_range=age_range or "unknown",  # ✅ Use "unknown" instead of "30-40"
                         family_structure=family_structure or "unknown",  # ✅ Use "unknown" instead of "single"
-                        risk_preference=risk_preference or "unknown",  # ✅ Use "unknown" instead of "moderate"
+                        risk_preference=mapped_risk_preference,  # ✅ Use RiskLevel enum
                         monthly_expense=monthly_expense,
                         occupation=occupation,
                         income_range=income_range
@@ -695,30 +707,55 @@ class AssetExtractionService:
             else:
                 logger.info(f"Skipping UserProfile creation - no useful fields provided")
         else:
-            # Update existing profile fields (only update if new value provided)
-            if risk_profile.get("age_range"):
-                profile.age_range = risk_profile["age_range"]
-                has_updates = True
+            # Update existing profile fields
+            # IMPORTANT: Only update if new value is provided AND is not "unknown"
+            # This prevents later extraction results from overwriting meaningful values
             
-            if risk_profile.get("family_structure"):
-                profile.family_structure = risk_profile["family_structure"]
-                has_updates = True
+            new_age_range = risk_profile.get("age_range")
+            if new_age_range and new_age_range != "unknown":
+                # Only update if current value is unknown or new value is different
+                if profile.age_range == "unknown" or profile.age_range != new_age_range:
+                    profile.age_range = new_age_range
+                    has_updates = True
+                    logger.info(f"Updated age_range for user {user_id}: {profile.age_range}")
             
-            if risk_profile.get("tolerance"):
-                profile.risk_preference = risk_profile["tolerance"]
-                has_updates = True
+            new_family_structure = risk_profile.get("family_structure")
+            if new_family_structure and new_family_structure != "unknown":
+                if profile.family_structure == "unknown" or profile.family_structure != new_family_structure:
+                    profile.family_structure = new_family_structure
+                    has_updates = True
+                    logger.info(f"Updated family_structure for user {user_id}: {profile.family_structure}")
+            
+            new_tolerance = risk_profile.get("tolerance")
+            if new_tolerance and new_tolerance != "unknown":
+                # Map tolerance string to RiskLevel enum
+                from app.models.user import RiskLevel
+                risk_level_mapping = {
+                    "conservative": RiskLevel.CONSERVATIVE,
+                    "moderate": RiskLevel.MODERATE,
+                    "aggressive": RiskLevel.AGGRESSIVE,
+                    "unknown": RiskLevel.UNKNOWN,
+                }
+                new_risk_preference = risk_level_mapping.get(new_tolerance, RiskLevel.UNKNOWN)
+                # Only update if current is UNKNOWN or new value is different
+                if profile.risk_preference == RiskLevel.UNKNOWN or profile.risk_preference != new_risk_preference:
+                    profile.risk_preference = new_risk_preference
+                    has_updates = True
+                    logger.info(f"Updated risk_preference for user {user_id}: {profile.risk_preference}")
             
             if risk_profile.get("monthly_expense") is not None:
                 profile.monthly_expense = risk_profile["monthly_expense"]
                 has_updates = True
             
-            if risk_profile.get("occupation"):
-                profile.occupation = risk_profile["occupation"]
+            new_occupation = risk_profile.get("occupation")
+            if new_occupation and new_occupation != "unknown":
+                profile.occupation = new_occupation
                 has_updates = True
                 logger.info(f"Updated occupation for user {user_id}: {profile.occupation}")
             
-            if risk_profile.get("income_range"):
-                profile.income_range = risk_profile["income_range"]
+            new_income_range = risk_profile.get("income_range")
+            if new_income_range and new_income_range != "unknown":
+                profile.income_range = new_income_range
                 has_updates = True
                 logger.info(f"Updated income_range for user {user_id}: {profile.income_range}")
             

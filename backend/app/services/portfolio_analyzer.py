@@ -18,12 +18,15 @@ class RiskLevel(str, Enum):
 
 
 class SPQuadrant(str, Enum):
-    """Standard & Poor's Four Quadrant Model"""
+    """Standard & Poor's Four Quadrant Model (Phase 2 升级版)"""
 
     SPENDING_MONEY = "spending"  # 要花的钱 (3-6个月生活费)
     LIFE_MONEY = "life"  # 保命的钱 (保险保障)
     GROWTH_MONEY = "growth"  # 生钱的钱 (高风险投资)
     PRESERVATION_MONEY = "preservation"  # 保本升值的钱 (稳健投资)
+    
+    # Phase 2 新增: 核心锚点资产 (自住房)
+    ANCHOR_ASSET = "anchor"  # 锚点资产 (自住房产)
 
 
 class AssetTaxonomy:
@@ -116,7 +119,7 @@ class PortfolioAnalysis:
 
 
 class PortfolioAnalyzer:
-    """Portfolio analyzer based on Standard & Poor's Four Quadrant Model"""
+    """Portfolio analyzer based on Standard & Poor's Four Quadrant Model (Phase 2 升级版)"""
 
     def __init__(self):
         # Standard risk thresholds (can be adjusted based on user profile)
@@ -132,6 +135,13 @@ class PortfolioAnalyzer:
             SPQuadrant.LIFE_MONEY: 0.20,  # 20% - 保命的钱
             SPQuadrant.GROWTH_MONEY: 0.30,  # 30% - 生钱的钱
             SPQuadrant.PRESERVATION_MONEY: 0.40,  # 40% - 保本升值的钱
+        }
+        
+        # Phase 2: 锚点资产配置
+        self.anchor_asset_config = {
+            "include_self_occupied_property": True,  # 自住房是否计入锚点
+            "anchor_ratio_warning": 0.7,  # 锚点资产占比警告阈值
+            "enable_leverage_suggestion": True,  # 是否启用抵押建议
         }
 
     def analyze_portfolio(
@@ -444,9 +454,9 @@ class PortfolioAnalyzer:
                     preservation = 0.32
 
                 allocations[SPQuadrant.SPENDING_MONEY] = spending
-            allocations[SPQuadrant.LIFE_MONEY] = life
-            allocations[SPQuadrant.GROWTH_MONEY] = growth
-            allocations[SPQuadrant.PRESERVATION_MONEY] = preservation
+                allocations[SPQuadrant.LIFE_MONEY] = life
+                allocations[SPQuadrant.GROWTH_MONEY] = growth
+                allocations[SPQuadrant.PRESERVATION_MONEY] = preservation
 
         # Final validation and normalization to ensure sum = 1.0
         total = sum(allocations.values())
@@ -460,12 +470,13 @@ class PortfolioAnalyzer:
     def _classify_assets_by_quadrant(
         self, assets: list[UserAsset], user_profile: UserProfile | None
     ) -> dict[SPQuadrant, float]:
-        """Classify assets into Standard & Poor's four quadrants"""
+        """Classify assets into Standard & Poor's quadrants (Phase 2 升级版)"""
         quadrant_values = {
             SPQuadrant.SPENDING_MONEY: 0.0,
             SPQuadrant.LIFE_MONEY: 0.0,
             SPQuadrant.GROWTH_MONEY: 0.0,
             SPQuadrant.PRESERVATION_MONEY: 0.0,
+            SPQuadrant.ANCHOR_ASSET: 0.0,  # Phase 2: 锚点资产
         }
 
         monthly_expense = self._get_monthly_expense(assets, user_profile)
@@ -502,10 +513,26 @@ class PortfolioAnalyzer:
                 quadrant_values[SPQuadrant.LIFE_MONEY] += asset.value
 
             elif asset.asset_type == AssetType.REAL_ESTATE:
-                # Real estate is typically preservation money (conservative assumption)
+                # Phase 2: 区分自住房和投资房
+                metadata = asset.extra_data if asset.extra_data else {}
+                usage = metadata.get("usage", "self_occupied")  # 默认为自住
+                
+                # 计算净值 (扣除贷款)
+                loan_balance = metadata.get("loan_balance", 0) or metadata.get("贷款余额", 0) or 0
+                net_value = max(0, asset.value - float(loan_balance))
+                
                 # Apply liquidity discount factor for real estate
-                liquid_value = asset.value * AssetTaxonomy.LIQUIDITY_DISCOUNT_REAL_ESTATE
-                quadrant_values[SPQuadrant.PRESERVATION_MONEY] += liquid_value
+                liquid_value = net_value * AssetTaxonomy.LIQUIDITY_DISCOUNT_REAL_ESTATE
+                
+                if usage in ["self_occupied", "自住"] and self.anchor_asset_config["include_self_occupied_property"]:
+                    # 自住房归入锚点资产
+                    quadrant_values[SPQuadrant.ANCHOR_ASSET] += liquid_value
+                elif usage in ["rented", "出租"]:
+                    # 出租房归入生钱的钱
+                    quadrant_values[SPQuadrant.GROWTH_MONEY] += liquid_value
+                else:
+                    # 其他房产归入保本升值
+                    quadrant_values[SPQuadrant.PRESERVATION_MONEY] += liquid_value
 
             elif asset.asset_type == AssetType.INVESTMENT:
                 # Use helper methods for safe metadata access
@@ -558,8 +585,9 @@ class PortfolioAnalyzer:
         gaps = {}
 
         for quadrant in SPQuadrant:
-            ideal_amount = ideal[quadrant] * net_worth
-            current_amount = current[quadrant]
+            # Use get() with default 0 for quadrants that may not be in ideal (e.g., ANCHOR_ASSET)
+            ideal_amount = ideal.get(quadrant, 0) * net_worth
+            current_amount = current.get(quadrant, 0)
             gaps[quadrant] = ideal_amount - current_amount
 
         return gaps
@@ -583,9 +611,9 @@ class PortfolioAnalyzer:
         ideal_spending_amount = (monthly_expense + monthly_debt_payment) * 6
 
         for quadrant in SPQuadrant:
-            current_amount = current[quadrant]
+            current_amount = current.get(quadrant, 0)
             current_ratio = current_amount / total_current if total_current > 0 else 0
-            ideal_ratio = ideal[quadrant]
+            ideal_ratio = ideal.get(quadrant, 0)
 
             # Override ideal amount for spending money with expense-based calculation
             if quadrant == SPQuadrant.SPENDING_MONEY:
@@ -602,7 +630,8 @@ class PortfolioAnalyzer:
                 SPQuadrant.LIFE_MONEY: "保命的钱",
                 SPQuadrant.GROWTH_MONEY: "生钱的钱",
                 SPQuadrant.PRESERVATION_MONEY: "保本升值的钱",
-            }[quadrant]
+                SPQuadrant.ANCHOR_ASSET: "锚点资产",
+            }.get(quadrant, quadrant.value)
 
             analysis["quadrants"][quadrant.value] = {
                 "name": quadrant_name,
@@ -658,16 +687,39 @@ class PortfolioAnalyzer:
         warnings = []
 
         # Traditional risk warnings
-        # Real estate concentration risk
-        if analysis.real_estate_ratio > thresholds["real_estate_max"]:
-            severity = "high" if analysis.real_estate_ratio > 0.85 else "medium"
+        # Real estate analysis: distinguish anchor (self-occupied) vs. investment properties
+        
+        # Calculate anchor asset ratio (self-occupied properties)
+        anchor_ratio = 0.0
+        investment_re_ratio = 0.0
+        if analysis.net_worth > 0:
+            anchor_value = analysis.quadrant_allocations.get(SPQuadrant.ANCHOR_ASSET, 0)
+            anchor_ratio = anchor_value / analysis.net_worth
+            investment_re_ratio = analysis.real_estate_ratio - anchor_ratio
+        
+        # Phase 2 Update: Anchor assets (自住房) are strategic foundation, NOT concentration risk
+        # Only warn about INVESTMENT property concentration
+        if investment_re_ratio > 0.4:  # >40% in investment properties is high
+            severity = "high" if investment_re_ratio > 0.5 else "medium"
             warnings.append(
                 {
-                    "type": "real_estate_concentration",
+                    "type": "investment_property_concentration",
                     "severity": severity,
-                    "title": "房产集中度风险",
-                    "description": f"房产占净资产比例为{analysis.real_estate_ratio:.1%}，超过建议上限{thresholds['real_estate_max']:.1%}",
-                    "recommendation": "建议增加其他投资类别，如股票基金、债券等，以分散风险",
+                    "title": "投资性房产占比偏高",
+                    "description": f"投资性房产占净资产{investment_re_ratio:.1%}，占比较高",
+                    "recommendation": "建议适当分散投资，可考虑金融资产配置以增加流动性",
+                }
+            )
+        
+        # Add positive anchor asset insight (informational, not a warning)
+        if anchor_ratio > 0.3:  # If self-occupied property is significant
+            warnings.append(
+                {
+                    "type": "anchor_asset_strength",
+                    "severity": "info",  # Informational, not a risk
+                    "title": "核心锚点资产稳固",
+                    "description": f"自住房产作为家庭锚点资产，占净资产{anchor_ratio:.1%}，提供居住保障和稳定基础",
+                    "recommendation": "可利用房产抵押潜力进行资产配置优化",
                 }
             )
 
@@ -868,26 +920,27 @@ class PortfolioAnalyzer:
 
         # Traditional recommendations (fallback if no quadrant analysis)
         if not recommendations:
-            # Asset allocation recommendations
-            if analysis.real_estate_ratio > thresholds["real_estate_max"]:
-                target_other_assets = analysis.net_worth * (
-                    1 - thresholds["real_estate_max"]
-                )
-                current_other_assets = analysis.net_worth * (
-                    1 - analysis.real_estate_ratio
-                )
+            # Asset allocation recommendations - focus on INVESTMENT properties
+            # Calculate investment property ratio (excluding anchor/self-occupied)
+            anchor_val = analysis.quadrant_allocations.get(SPQuadrant.ANCHOR_ASSET, 0)
+            anchor_r = anchor_val / analysis.net_worth if analysis.net_worth > 0 else 0
+            invest_re_ratio = analysis.real_estate_ratio - anchor_r
+            
+            if invest_re_ratio > 0.4:  # Investment properties > 40%
+                target_other_assets = analysis.net_worth * 0.6  # At least 60% non-investment-RE
+                current_other_assets = analysis.net_worth * (1 - invest_re_ratio)
                 additional_needed = target_other_assets - current_other_assets
 
                 recommendations.append(
                     {
                         "type": "diversification",
                         "priority": "high",
-                        "title": "增加资产多元化",
-                        "description": f"建议增加{additional_needed:,.0f}元的非房产投资",
+                        "title": "优化投资性房产配置",
+                        "description": f"投资性房产占比较高({invest_re_ratio:.1%})，建议增加{additional_needed:,.0f}元金融资产",
                         "specific_actions": [
-                            "考虑投资股票型基金或ETF",
-                            "配置部分债券或债券基金",
-                            "可考虑黄金等避险资产",
+                            "考虑投资股票型基金或ETF增加流动性",
+                            "配置部分债券基金增加稳定收益",
+                            "可利用房产抵押盘活部分资产",
                         ],
                     }
                 )

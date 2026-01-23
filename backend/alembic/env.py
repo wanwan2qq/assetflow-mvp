@@ -11,7 +11,10 @@ from app.core.config import settings
 
 # Import all models to ensure they are registered with SQLModel
 from app.models.chat import ChatSession  # noqa: F401
+from app.models.cognition import UserCognition  # noqa: F401
 from app.models.commercial import CommercialProduct  # noqa: F401
+from app.models.knowledge import FAQKnowledge, PolicyKnowledge, ProductKnowledge  # noqa: F401
+from app.models.real_estate import RealEstateAsset  # noqa: F401
 from app.models.user import User, UserAsset, UserProfile  # noqa: F401
 
 # this is the Alembic Config object, which provides

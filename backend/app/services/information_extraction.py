@@ -861,6 +861,16 @@ class InformationExtractor:
 information_extractor = InformationExtractor()
 
 
+def get_information_extractor() -> InformationExtractor:
+    """
+    Get the InformationExtractor instance.
+    
+    Factory function for dependency injection compatibility.
+    Returns the global singleton instance.
+    """
+    return information_extractor
+
+
 def extract_information_from_conversation(
     text: str,
 ) -> tuple[list[ExtractedAsset], ExtractedUserProfile | None, dict[str, Any]]:

@@ -20,10 +20,12 @@ class AssetType(str, Enum):
 
 
 class RiskLevel(str, Enum):
-    CONSERVATIVE = "conservative"  # 保守型
-    MODERATE = "moderate"  # 稳健型
-    AGGRESSIVE = "aggressive"  # 激进型
-    UNKNOWN = "unknown"  # 未知
+    # NOTE: Values must be UPPERCASE to match PostgreSQL enum created in initial migration
+    # The database enum uses: CONSERVATIVE, MODERATE, AGGRESSIVE
+    CONSERVATIVE = "CONSERVATIVE"  # 保守型
+    MODERATE = "MODERATE"  # 稳健型
+    AGGRESSIVE = "AGGRESSIVE"  # 激进型
+    UNKNOWN = "UNKNOWN"  # 未知
 
 
 class User(SQLModel, table=True):

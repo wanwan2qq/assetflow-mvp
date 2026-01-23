@@ -1,0 +1,42 @@
+# 政策规则约束 Prompt 模板
+# 用于生成规则引擎的约束描述文本
+# 使用方式: prompt_manager.render("rule", "policy_constraint", "constraint_template", ...)
+
+# 通用约束模板
+constraint_template: |
+  根据{{ city }}的购房政策：
+  {{ constraint_text }}
+
+# 限购政策描述模板
+purchase_limit_description: |
+  【限购政策】{{ city }}
+  - 户籍要求：{{ hukou_requirement }}
+  - 最多可购：{{ max_properties }}套
+  - 特殊要求：{{ special_requirements }}
+
+# 贷款政策描述模板
+loan_policy_description: |
+  【贷款政策】{{ city }}
+  - 首付比例：{{ down_payment_ratio }}
+  - 贷款利率：{{ loan_rate }}
+  - 公积金额度：{{ provident_fund_limit }}
+
+# 公积金政策描述模板
+provident_fund_description: |
+  【公积金政策】{{ city }}
+  - 提取条件：{{ withdrawal_conditions }}
+  - 贷款额度：{{ loan_limit }}
+  - 缴存要求：{{ deposit_requirement }}
+
+# 税费政策描述模板
+tax_policy_description: |
+  【税费政策】{{ city }}
+  - 契税：{{ deed_tax }}
+  - 个人所得税：{{ income_tax }}
+  - 增值税：{{ vat }}
+
+metadata:
+  version: "1.0"
+  category: "rule"
+  description: "政策规则约束模板"
+  author: "Phase 3"

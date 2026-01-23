@@ -1,0 +1,51 @@
+- name: "安心保定期寿险"
+  product_type: "insurance"
+  provider: "平安保险"
+  description: "一款高性价比的定期寿险，保障身故和全残，适合家庭经济支柱。"
+  features:
+    - "保额高，最高可达300万"
+    - "免体检，线上投保便捷"
+    - "等待期短，仅90天"
+  suitable_for:
+    risk_preference: ["conservative", "balanced"]
+    target_user: ["family_breadwinner"]
+  priority: 8
+
+- name: "招商银行朝朝宝"
+  product_type: "deposit"
+  provider: "招商银行"
+  description: "活期理财产品，灵活性强，随取随用，收益高于普通活期存款。"
+  features:
+    - "1分钱起购"
+    - "7x24小时随时赎回"
+    - "可以直接用于支付和转账"
+  suitable_for:
+    risk_preference: ["conservative"]
+    liquidity_needs: "high"
+  priority: 9
+
+- name: "易方达蓝筹精选混合"
+  product_type: "fund"
+  provider: "易方达基金"
+  description: "混合型基金，主要投资于蓝筹股，长期业绩优秀，但也伴随市场波动风险。"
+  features:
+    - "明星经理管理"
+    - "聚焦优质蓝筹企业"
+    - "历史长期年化收益较高"
+  suitable_for:
+    risk_preference: ["aggressive", "balanced"]
+    investment_horizon: "long_term"
+  priority: 7
+
+- name: "中信证券稳健理财"
+  product_type: "other"
+  provider: "中信证券"
+  description: "固定收益类理财产品，风险较低，适合短期闲置资金理财。"
+  features:
+    - "期限灵活（30天/90天/180天）"
+    - "主要投资债券和货币市场工具"
+    - "业绩比较基准 3.5%~4.0%"
+  suitable_for:
+    risk_preference: ["conservative"]
+    investment_horizon: "medium_term"
+  priority: 8

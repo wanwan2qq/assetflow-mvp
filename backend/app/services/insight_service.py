@@ -452,6 +452,10 @@ class InsightService:
                 
                 cognition.risk_profile.update(updated_fields)
                 
+                # ✅ CRITICAL: Flag JSON field as modified for SQLAlchemy to detect the change
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(cognition, 'risk_profile')
+                
                 # Update advisor note (direct mapping from new structure)
                 advisor_note = analysis.get("advisor_note")
                 if advisor_note:
@@ -459,6 +463,9 @@ class InsightService:
                 
                 cognition.updated_at = datetime.utcnow()
                 
+                # Force flush to ensure changes are written
+                session.add(cognition)
+                await session.flush()
                 await session.commit()
                 
                 # ✅ Enhanced logging to track complete update

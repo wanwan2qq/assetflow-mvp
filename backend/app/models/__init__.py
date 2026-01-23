@@ -10,6 +10,10 @@ from .interaction import UserInteraction
 from .memory import VectorMemory, VectorMemoryCreate, VectorMemoryRead
 from .user import AssetType, RiskLevel, User, UserAsset, UserProfile
 
+# Phase 4 models
+from .action_plan import ActionPlan, ActionCategory, ActionPriority, ActionStep
+from .family import FamilyProfile, FamilyMember, LifecycleEvent, FamilyRelation, LifecycleEventType
+
 __all__ = [
     # User models
     "User",
@@ -40,4 +44,18 @@ __all__ = [
     # Audit models
     "AuditLog",
     "UserAssetHistory",
+    
+    # Phase 4: ActionPlan models
+    "ActionPlan",
+    "ActionCategory",
+    "ActionPriority",
+    "ActionStep",
+    
+    # Phase 4: Family models
+    "FamilyProfile",
+    "FamilyMember",
+    "LifecycleEvent",
+    "FamilyRelation",
+    "LifecycleEventType",
 ]
+

@@ -14,6 +14,7 @@ class UserCognition(SQLModel, table=True):
     User cognition model for tracking information collection state and AI insights.
     This model implements L2 layer state management to prevent repetitive questioning.
     """
+    __tablename__ = "user_cognition"
     
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", unique=True, index=True)
