@@ -18,15 +18,6 @@ class DashboardPage extends ConsumerWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('资产仪表板'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () {
-              ref.invalidate(assetListProvider);
-              ref.invalidate(portfolioHealthDataProvider);
-            },
-          ),
-        ],
       ),
       body: RefreshIndicator(
         onRefresh: () async {

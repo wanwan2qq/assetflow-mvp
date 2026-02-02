@@ -11,7 +11,7 @@ from .memory import VectorMemory, VectorMemoryCreate, VectorMemoryRead
 from .user import AssetType, RiskLevel, User, UserAsset, UserProfile
 
 # Phase 4 models
-from .action_plan import ActionPlan, ActionCategory, ActionPriority, ActionStep
+from .action_plan import ActionPlan, ActionCategory, ActionPriority, ActionPlanStep, ActionStatus
 from .family import FamilyProfile, FamilyMember, LifecycleEvent, FamilyRelation, LifecycleEventType
 
 __all__ = [
@@ -49,7 +49,8 @@ __all__ = [
     "ActionPlan",
     "ActionCategory",
     "ActionPriority",
-    "ActionStep",
+    "ActionPlanStep",
+    "ActionStatus",
     
     # Phase 4: Family models
     "FamilyProfile",

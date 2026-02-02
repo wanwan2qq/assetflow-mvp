@@ -184,6 +184,7 @@ class CityBenchmarkData:
         
         # 1. 获取城市基准价
         base_price = self.CITY_AVG_PRICES.get(city, self.CITY_AVG_PRICES["default"])
+        logger.info(f"VALUATION DEBUG: base_price for city '{city}' is {base_price}")
         
         # 2. 区域调整
         district_multiplier = 1.0
@@ -401,8 +402,10 @@ class PropertyValuationService:
         
         # Tier 2: 本地基准数据
         if use_tier is None or use_tier == 2:
+            logger.info(f"VALUATION DEBUG: location='{location}', city='{city}', district='{district}', area={area}")
             benchmark_result = self.benchmark_data.estimate(
                 city=city,
+
                 district=district,
                 area=area,
                 year_built=year_built,
@@ -539,17 +542,30 @@ class PropertyValuationService:
         match = re.search(r'(\w{2,4})市', location)
         if match:
             city_name = match.group(1)
-            if city_name in cities:
-                return city_name
-            # 返回匹配到的城市名（可能不在列表中）
-            return city_name
+            # Remove "市" if it exists in the name for matching
+            city_name_clean = city_name.replace("市", "")
+            
+            # Check if likely city exists in keys (fuzzy match)
+            for k in cities:
+                if k in city_name_clean or city_name_clean in k:
+                    return k
+                    
+            return city_name_clean 
         
         return "default"
     
     def _extract_district(self, location: str) -> str | None:
         """从位置描述中提取区域"""
+        # First extract city to avoid capturing "北京朝阳" when city is Beijing
+        city = self._extract_city(location)
+        
+        search_text = location
+        if city != "default" and city in location:
+            # Remove city name to isolate district
+            search_text = location.replace(city, "").replace("市", "")
+            
         # 尝试匹配 "XX区" 格式
-        match = re.search(r'(\w{2,4})区', location)
+        match = re.search(r'(\w{2,4})区', search_text)
         if match:
             return match.group(1)
         return None

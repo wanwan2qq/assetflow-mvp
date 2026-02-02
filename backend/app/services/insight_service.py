@@ -8,12 +8,13 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from langchain_openai import ChatOpenAI
 from sqlmodel import select
 
 from app.core.config import settings
 from app.core.database import get_db_session
+from app.core.dependencies import get_llm_provider
 from app.core.prompt_manager import prompt_manager
+from app.services.llm_caller import LLMProvider
 from app.models.chat import ChatMessage, MessageRole
 from app.models.cognition import UserCognition
 
@@ -27,30 +28,8 @@ class InsightService:
     """
 
     def __init__(self, openai_api_key: str | None = None):
-        self.openai_api_key = openai_api_key or settings.OPENAI_API_KEY
-        
-        # Check if we have a valid OpenAI API key
-        self.has_real_openai_key = (
-            self.openai_api_key 
-            and not self.openai_api_key.startswith("sk-mock")
-            and self.openai_api_key != "mock-key"
-        )
-        
-        if not self.has_real_openai_key:
-            logger.warning("No valid OpenAI API key - insight service will use mock analysis")
-            self.llm = None
-        else:
-            # Initialize LLM for psychological analysis
-            llm_kwargs = {
-                "model": "deepseek-chat",
-                "temperature": 0.3,  # Lower temperature for more consistent analysis
-                "api_key": self.openai_api_key,
-            }
-            
-            if settings.OPENAI_API_BASE:
-                llm_kwargs["base_url"] = settings.OPENAI_API_BASE
-            
-            self.llm = ChatOpenAI(**llm_kwargs)
+        self.llm = get_llm_provider()
+        logger.info(f"InsightService initialized with LLM provider: {type(self.llm).__name__}")
 
     async def analyze_user_psychology(
         self, 
@@ -72,6 +51,8 @@ class InsightService:
             Analysis result with risk_profile, sentiment, and advisor_note
         """
         try:
+            logger.info(f"Starting psychology analysis for user {user_id}")
+            
             # ✅ Step 1: Get the last analyzed message ID
             last_analyzed_id = await self._get_last_analyzed_message_id(user_id)
             
@@ -88,19 +69,18 @@ class InsightService:
                 logger.debug(f"No new messages for user {user_id} - skipping analysis")
                 return {"skipped": True, "reason": "no_new_messages"}
             
-            # ✅ Step 4: Skip if insufficient new messages (LOWERED threshold for better responsiveness)
-            if len(recent_messages) < 3:  # ✅ LOWERED from 5 to 3 messages
+            # ✅ Step 4: Skip if insufficient new messages
+            # Note: We log this clearly so the user knows why LLM isn't called
+            if len(recent_messages) < 3: 
                 logger.debug(
                     f"Insufficient new messages ({len(recent_messages)}) for user {user_id} "
                     f"- skipping analysis (threshold=3)"
                 )
                 return {"skipped": True, "reason": "insufficient_new_messages"}
             
-            # Perform psychological analysis
-            if self.has_real_openai_key and self.llm:
-                analysis = await self._analyze_with_llm(recent_messages)
-            else:
-                analysis = self._analyze_mock(recent_messages)
+            # Perform psychological analysis using LLM interface
+            logger.info(f"analyzing {len(recent_messages)} messages with {type(self.llm).__name__}")
+            analysis = await self._analyze_with_llm(recent_messages)
             
             # Update UserCognition with insights
             await self._update_cognition_insights(user_id, analysis)
@@ -120,7 +100,7 @@ class InsightService:
             return analysis
             
         except Exception as e:
-            logger.error(f"Error analyzing user psychology for user {user_id}: {e}")
+            logger.error(f"Error analyzing user psychology for user {user_id}: {e}", exc_info=True)
             return {"error": str(e)}
 
     async def _fetch_recent_messages(self, user_id: int, limit: int = 50) -> list[ChatMessage]:
@@ -250,13 +230,11 @@ class InsightService:
 
         try:
             # Call LLM for analysis
-            messages_for_llm = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-            
-            response = await self.llm.ainvoke(messages_for_llm)
-            response_text = response.content
+            response_text = await self.llm.generate(
+                messages=[{"role": "user", "content": user_prompt}],
+                system_prompt=system_prompt,
+                temperature=0.3
+            )
             
             # Enhanced JSON parsing - handle new flattened structure
             analysis = self._parse_psychology_response(response_text)
@@ -497,11 +475,10 @@ class InsightService:
             
             conversation_text = "\n".join(user_messages[-10:])  # Analyze last 10 messages
             
-            # Use LLM for semantic extraction if available, otherwise fallback to keyword matching
-            if self.has_real_openai_key and self.llm:
-                memories = await self._extract_memories_with_llm(conversation_text)
-            else:
-                memories = self._extract_memories_fallback(conversation_text)
+            # Use LLM for semantic extraction
+            # We always use the LLM now, assuming configuration is correct
+            logger.info(f"Extracting memories using {type(self.llm).__name__}")
+            memories = await self._extract_memories_with_llm(conversation_text)
             
             # Store extracted memories with new fields
             for mem in memories:
@@ -513,7 +490,7 @@ class InsightService:
                         "tags": mem.get("tags", []),
                         "timeline": mem.get("timeline"),  # New field
                         "importance": mem.get("importance", "medium"),  # New field
-                        "source": "llm_insight_extraction" if self.has_real_openai_key else "keyword_extraction",
+                        "source": "llm_insight_extraction",
                         "timestamp": datetime.utcnow().isoformat()
                     }
                 )
@@ -522,7 +499,7 @@ class InsightService:
                 logger.info(f"Extracted and stored {len(memories)} memories for user {user_id}")
             
         except Exception as e:
-            logger.error(f"Error extracting and storing key memories: {e}")
+            logger.error(f"Error extracting and storing key memories: {e}", exc_info=True)
     
     async def _extract_memories_with_llm(self, conversation_text: str) -> list[dict[str, Any]]:
         """Extract key memories using LLM semantic analysis - updated for new structure"""
@@ -543,13 +520,11 @@ class InsightService:
 
         try:
             # Call LLM for memory extraction
-            messages_for_llm = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-            
-            response = await self.llm.ainvoke(messages_for_llm)
-            response_text = response.content
+            response_text = await self.llm.generate(
+                messages=[{"role": "user", "content": user_prompt}],
+                system_prompt=system_prompt,
+                temperature=0.3
+            )
             
             # Parse JSON response - handle markdown code blocks
             cleaned_json = response_text.strip()

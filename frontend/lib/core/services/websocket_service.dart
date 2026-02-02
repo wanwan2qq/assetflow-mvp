@@ -117,6 +117,17 @@ class WebSocketService {
               return;
             }
             
+            // Handle connection confirmation
+            if (data.contains('"type":"connected"') || data.contains('"type": "connected"')) {
+               print('✅ Received connection confirmation from server');
+               if (_connectionState != WebSocketConnectionState.connected) {
+                 _setConnectionState(WebSocketConnectionState.connected);
+                 _resetReconnectAttempts();
+                 _startHeartbeat();
+               }
+               return; // Don't forward to message stream
+            }
+            
             // First message received means connection is truly established
             if (_connectionState != WebSocketConnectionState.connected) {
               _setConnectionState(WebSocketConnectionState.connected);
@@ -161,10 +172,11 @@ class WebSocketService {
       
       // Set a timeout to detect connection failures
       Timer(const Duration(seconds: 10), () {
-        if (_connectionState == WebSocketConnectionState.connecting) {
+        if (_connectionState == WebSocketConnectionState.connecting || 
+            _connectionState == WebSocketConnectionState.reconnecting) {
           print('❌ WebSocket connection timeout - likely authentication failed');
           _setConnectionState(WebSocketConnectionState.error);
-          _handleConnectionError('认证失败：Token可能已过期，请重新登录');
+          _handleConnectionError('认证失败：Token可能已过期，请重新登录', isFatal: true);
         }
       });
       
@@ -225,10 +237,18 @@ class WebSocketService {
     }
   }
 
-  void _handleConnectionError(dynamic error) {
+  void _handleConnectionError(dynamic error, {bool isFatal = false}) {
     _setConnectionState(WebSocketConnectionState.error);
     _messageController?.addError('Connection error: $error');
-    _scheduleReconnect();
+    
+    if (isFatal) {
+      print('⛔ Fatal error: $error - stopping reconnection attempts');
+      _stopReconnectTimer();
+      // Optionally clear credentials to prevent accidental retries
+      // _token = null; 
+    } else {
+      _scheduleReconnect();
+    }
   }
 
   void _handleConnectionClosed() {
@@ -286,7 +306,7 @@ class WebSocketService {
     
     try {
       await _establishConnection();
-      print('Reconnection successful after $_reconnectAttempts attempts');
+      print('Reconnection connection initiated for attempt $_reconnectAttempts (waiting for confirmation)');
     } catch (error) {
       print('Reconnection attempt $_reconnectAttempts failed: $error');
       _scheduleReconnect();

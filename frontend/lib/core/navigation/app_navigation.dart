@@ -23,6 +23,10 @@ class AppNavigation extends StatelessWidget {
             label: '聊天',
           ),
           BottomNavigationBarItem(
+            icon: Icon(Icons.assignment),
+            label: '行动',
+          ),
+          BottomNavigationBarItem(
             icon: Icon(Icons.dashboard),
             label: '仪表板',
           ),
@@ -40,11 +44,14 @@ class AppNavigation extends StatelessWidget {
     if (location.startsWith('/chat')) {
       return 0;
     }
-    if (location.startsWith('/dashboard')) {
+    if (location.startsWith('/actions')) {
       return 1;
     }
-    if (location.startsWith('/profile')) {
+    if (location.startsWith('/dashboard')) {
       return 2;
+    }
+    if (location.startsWith('/profile')) {
+      return 3;
     }
     return 0;
   }
@@ -55,9 +62,12 @@ class AppNavigation extends StatelessWidget {
         GoRouter.of(context).go('/chat');
         break;
       case 1:
-        GoRouter.of(context).go('/dashboard');
+        GoRouter.of(context).go('/actions');
         break;
       case 2:
+        GoRouter.of(context).go('/dashboard');
+        break;
+      case 3:
         GoRouter.of(context).go('/profile');
         break;
     }
@@ -71,6 +81,9 @@ class AppRoutes {
   static const String chat = '/chat';
   static const String chatName = 'chat';
   
+  static const String actions = '/actions';
+  static const String actionsName = 'actions';
+
   static const String dashboard = '/dashboard';
   static const String dashboardName = 'dashboard';
   

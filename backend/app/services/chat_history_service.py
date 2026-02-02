@@ -19,7 +19,12 @@ logger = logging.getLogger(__name__)
 class ChatHistoryService:
     """Service for managing chat message persistence"""
 
-    async def save_user_message(self, user_id: int, content: str) -> ChatMessage:
+    async def save_user_message(
+        self, 
+        user_id: int, 
+        content: str, 
+        meta_data: dict[str, Any] | None = None
+    ) -> ChatMessage:
         """Save a user message to the database"""
         try:
             async for session in get_db_session():
@@ -27,7 +32,7 @@ class ChatHistoryService:
                     user_id=user_id,
                     role=MessageRole.USER,
                     content=content,
-                    meta_data=None,  # User messages typically don't have widget data
+                    meta_data=meta_data,
                     timestamp=datetime.utcnow()
                 )
                 
@@ -88,6 +93,23 @@ class ChatHistoryService:
         except Exception as e:
             logger.error(f"Error getting chat history: {e}")
             raise
+    
+    async def has_history(self, user_id: int) -> bool:
+        """Check if a user has any chat history"""
+        try:
+            async for session in get_db_session():
+                statement = (
+                    select(ChatMessage)
+                    .where(ChatMessage.user_id == user_id)
+                    .limit(1)
+                )
+                
+                result = await session.execute(statement)
+                return result.first() is not None
+                
+        except Exception as e:
+            logger.error(f"Error checking chat history: {e}")
+            return False
 
     def _extract_widget_metadata(self, content: str) -> dict[str, Any] | None:
         """Extract widget data from AI response content"""

@@ -63,6 +63,7 @@ class KnowledgeRetriever:
         self,
         query: str,
         category: str | None = None,
+        filters: dict | None = None,
         top_k: int = 5,
         min_score: float = 0.3
     ) -> list[KnowledgeChunk]:
@@ -74,6 +75,7 @@ class KnowledgeRetriever:
         Args:
             query: 查询文本
             category: 可选的知识分类过滤
+            filters: 可选的元数据过滤 (e.g. {"city": "Beijing"})
             top_k: 返回结果数量
             min_score: 最低相似度阈值
             
@@ -81,8 +83,8 @@ class KnowledgeRetriever:
             按相关性排序的 KnowledgeChunk 列表
         """
         # 并行执行向量搜索和关键词搜索
-        vector_results = await self.vector_search(query, category, top_k * 2)
-        keyword_results = await self.keyword_search(query, category, top_k * 2)
+        vector_results = await self.vector_search(query, category, filters, top_k * 2)
+        keyword_results = await self.keyword_search(query, category, filters, top_k * 2)
         
         # 合并结果，去重
         merged = self._merge_results(vector_results, keyword_results)
@@ -96,6 +98,7 @@ class KnowledgeRetriever:
         self,
         query: str,
         category: str | None = None,
+        filters: dict | None = None,
         top_k: int = 10
     ) -> list[KnowledgeChunk]:
         """
@@ -122,6 +125,7 @@ class KnowledgeRetriever:
             PolicyKnowledge,
             query_embedding,
             category,
+            filters,
             top_k
         )
         results.extend(policy_results)
@@ -131,6 +135,7 @@ class KnowledgeRetriever:
             FAQKnowledge,
             query_embedding,
             category,
+            filters,
             top_k
         )
         results.extend(faq_results)
@@ -144,6 +149,7 @@ class KnowledgeRetriever:
         self,
         query: str,
         category: str | None = None,
+        filters: dict | None = None,
         top_k: int = 10
     ) -> list[KnowledgeChunk]:
         """
@@ -165,6 +171,7 @@ class KnowledgeRetriever:
                 PolicyKnowledge,
                 keywords,
                 category,
+                filters,
                 top_k
             )
             results.extend(policy_results)
@@ -175,6 +182,7 @@ class KnowledgeRetriever:
                 FAQKnowledge,
                 keywords,
                 category,
+                filters,
                 top_k
             )
             results.extend(faq_results)
@@ -189,6 +197,7 @@ class KnowledgeRetriever:
         model,
         query_embedding: list[float],
         category: str | None,
+        filters: dict | None,
         top_k: int
     ) -> list[KnowledgeChunk]:
         """对单个表执行向量搜索"""
@@ -202,6 +211,20 @@ class KnowledgeRetriever:
             
             if category and hasattr(model, 'category'):
                 stmt = stmt.where(model.category == category)
+            
+            # Application of metadata filters
+            if filters:
+                # City Filter (PolicyKnowledge)
+                # Logic: If query context has city, return policies for that city OR national (city IS NULL)
+                if 'city' in filters and hasattr(model, 'city'):
+                    target_city = filters['city']
+                    # Use SQLAlchemy OR condition
+                    stmt = stmt.where(
+                        or_(
+                            model.city == target_city,
+                            model.city.is_(None)
+                        )
+                    )
             
             # 只查询有 embedding 的记录
             stmt = stmt.where(model.embedding.isnot(None))
@@ -238,6 +261,7 @@ class KnowledgeRetriever:
         model,
         keywords: list[str],
         category: str | None,
+        filters: dict | None,
         top_k: int
     ) -> list[KnowledgeChunk]:
         """对单个表执行关键词搜索"""
@@ -268,6 +292,18 @@ class KnowledgeRetriever:
         
         if category and hasattr(model, 'category'):
             stmt = stmt.where(model.category == category)
+            
+        # Application of metadata filters
+        if filters:
+            # City Filter (PolicyKnowledge)
+            if 'city' in filters and hasattr(model, 'city'):
+                target_city = filters['city']
+                stmt = stmt.where(
+                    or_(
+                        model.city == target_city,
+                        model.city.is_(None)
+                    )
+                )
         
         stmt = stmt.limit(top_k)
         

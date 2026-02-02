@@ -47,15 +47,15 @@ class AssetExtractionService:
         for extracted_asset in extracted_assets:
             try:
                 # Check if similar asset already exists
+                logger.info(f"[DEBUG] Calling _find_similar_asset with user_id={user_id}, asset={extracted_asset.name}")
                 existing_asset = await self._find_similar_asset(
                     user_id, extracted_asset, session
                 )
 
                 if existing_asset:
                     # Update existing asset if new data has higher confidence
-                    if extracted_asset.confidence > existing_asset.metadata.get(
-                        "confidence", 0
-                    ):
+                    current_conf = (existing_asset.extra_data or {}).get("confidence", 0)
+                    if extracted_asset.confidence > current_conf:
                         await self._update_asset_from_extracted(
                             existing_asset, extracted_asset, session
                         )
@@ -144,7 +144,8 @@ class AssetExtractionService:
     async def _find_similar_asset(
         self, user_id: int, extracted_asset: ExtractedAsset, session: Session
     ) -> UserAsset | None:
-        """Find similar existing asset"""
+        """Find similar existing asset with fine-grained matching logic"""
+        logger.info(f"[DEBUG] Inside _find_similar_asset for {extracted_asset.name}")
 
         # Convert extracted asset type to database enum
         asset_type_mapping = {
@@ -153,50 +154,113 @@ class AssetExtractionService:
             "investment": AssetType.INVESTMENT,
             "insurance": AssetType.INSURANCE,
             "liability": AssetType.LIABILITY,
+            # Map extended types to available categories
+            "mutual_fund": AssetType.INVESTMENT,
+            "etf": AssetType.INVESTMENT,
+            "stock": AssetType.INVESTMENT,
+            "bond": AssetType.INVESTMENT,
+            "crypto": AssetType.INVESTMENT,
+            "other": AssetType.INVESTMENT, # Fallback
         }
+        
+        # Determine strict asset type
+        # Note: extracted_asset.asset_type might be a string or Enum depending on Pydantic model
+        # We try to use it as a key for mapping
+        lookup_key = extracted_asset.asset_type
+        if hasattr(lookup_key, "value"):
+            lookup_key = lookup_key.value
+            
+        db_asset_type = asset_type_mapping.get(lookup_key.lower() if isinstance(lookup_key, str) else lookup_key)
+        
+        # Fallback if not found in specific map (e.g. if extracted_asset.asset_type is already the Enum)
+        if not db_asset_type and isinstance(extracted_asset.asset_type, AssetType):
+            db_asset_type = extracted_asset.asset_type
 
-        db_asset_type = asset_type_mapping.get(extracted_asset.asset_type)
         if not db_asset_type:
+            logger.warning(f"Unknown asset type: {extracted_asset.asset_type}")
             return None
 
-        # Query for similar assets
-        statement = select(UserAsset).where(
-            UserAsset.user_id == user_id, UserAsset.asset_type == db_asset_type
-        )
+        # Helper vars from extracted asset
+        name = extracted_asset.name
+        location = extracted_asset.location
+        area = extracted_asset.area
 
-        result = await session.execute(statement)
-        existing_assets = result.scalars().all()
+        try:
+            # Query all assets of the same type for this user
+            statement = select(UserAsset).where(
+                UserAsset.user_id == user_id,
+                UserAsset.asset_type == db_asset_type
+            )
+            result = await session.execute(statement)
+            existing_assets = result.scalars().all()
+            
+            if not existing_assets:
+                return None
+            
+            # Special matching logic for real estate
+            if db_asset_type == AssetType.REAL_ESTATE:
+                for asset in existing_assets:
+                    # Note: Use extra_data, not metadata which might be missing/alias
+                    asset_location = (asset.extra_data or {}).get("location")
+                    asset_area = (asset.extra_data or {}).get("area")
+                    
+                    # Normalize extracted data
+                    ext_loc_norm = location.replace(" ", "").lower() if location else ""
+                    ext_name_norm = name.replace(" ", "").lower()
+                    
+                    # Normalize asset data
+                    asset_loc_norm = asset_location.replace(" ", "").lower() if asset_location else ""
+                    asset_name_norm = asset.name.replace(" ", "").lower()
+                    
+                    # MATCH 1: Location overlap (if both exist)
+                    if ext_loc_norm and asset_loc_norm:
+                        if ext_loc_norm in asset_loc_norm or asset_loc_norm in ext_loc_norm:
+                            logger.info(f"Matched real estate by location overlap: '{location}' ~ '{asset_location}'")
+                            return asset
 
-        # For real estate, match by location and area
-        if db_asset_type == AssetType.REAL_ESTATE:
-            for asset in existing_assets:
-                asset_location = (
-                    asset.metadata.get("location") if asset.metadata else None
-                )
-                asset_area = asset.metadata.get("area") if asset.metadata else None
-
-                # Match by location or area similarity
-                if (
-                    extracted_asset.location
-                    and asset_location
-                    and extracted_asset.location in asset_location
-                ):
-                    return asset
-
-                if (
-                    extracted_asset.area
-                    and asset_area
-                    and abs(extracted_asset.area - asset_area) < 10
-                ):  # Within 10 sqm
-                    return asset
-
-        # For other asset types, match by name similarity
-        else:
-            for asset in existing_assets:
-                if extracted_asset.name.lower() in asset.name.lower():
-                    return asset
-
-        return None
+                    # MATCH 2: Name overlap (if substantial)
+                    if ext_name_norm in asset_name_norm or asset_name_norm in ext_name_norm:
+                         logger.info(f"Matched real estate by name overlap: '{name}' ~ '{asset.name}'")
+                         return asset
+                         
+                    # MATCH 3: Cross-field overlap (Name vs Location)
+                    if ext_loc_norm and asset_name_norm:
+                         if ext_loc_norm in asset_name_norm or asset_name_norm in ext_loc_norm:
+                             logger.info(f"Matched real estate by cross-field (Loc vs Name): '{location}' ~ '{asset.name}'")
+                             return asset
+                             
+                    if ext_name_norm and asset_loc_norm:
+                        if ext_name_norm in asset_loc_norm or asset_loc_norm in ext_name_norm:
+                            logger.info(f"Matched real estate by cross-field (Name vs Loc): '{name}' ~ '{asset_location}'")
+                            return asset
+                    
+                    # MATCH 4: Area exact match (strong signal) with tolerance
+                    if area and asset_area:
+                        # Ensure we are comparing numbers
+                        try:
+                            if abs(float(area) - float(asset_area)) < 5:
+                                logger.info(f"Matched real estate by area: {area} ~ {asset_area}")
+                                return asset
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    # MATCH 5: Fuzzy name check (fallback)
+                    if self._is_name_similar(name, asset.name):
+                        logger.info(f"Matched real estate by fuzzy name: '{name}' ~ '{asset.name}'")
+                        return asset
+            
+            # For other asset types, match by name similarity
+            else:
+                for asset in existing_assets:
+                    if self._is_name_similar(name, asset.name):
+                        logger.info(f"Matched {db_asset_type.value} by name: '{name}' ~ '{asset.name}'")
+                        return asset
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error finding similar asset: {e}")
+            return None
 
     async def _create_asset_from_extracted(
         self, user_id: int, extracted_asset: ExtractedAsset, session: Session
@@ -236,7 +300,7 @@ class AssetExtractionService:
             name=extracted_asset.name,
             value=extracted_asset.value or 0.0,
             is_confirmed=False,  # Extracted assets need user confirmation
-            metadata=metadata,
+            extra_data=metadata,
         )
 
         session.add(asset)
@@ -258,14 +322,14 @@ class AssetExtractionService:
             existing_asset.value = extracted_asset.value
 
         # Update metadata
-        if not existing_asset.metadata:
-            existing_asset.metadata = {}
+        if not existing_asset.extra_data:
+            existing_asset.extra_data = {}
 
-        existing_asset.metadata.update(
+        existing_asset.extra_data.update(
             {
                 "confidence": max(
                     extracted_asset.confidence,
-                    existing_asset.metadata.get("confidence", 0),
+                    (existing_asset.extra_data or {}).get("confidence", 0),
                 ),
                 "last_extraction": extracted_asset.timestamp,
                 "extraction_source": extracted_asset.extracted_from,
@@ -273,13 +337,81 @@ class AssetExtractionService:
         )
 
         if extracted_asset.location:
-            existing_asset.metadata["location"] = extracted_asset.location
+            existing_asset.extra_data["location"] = extracted_asset.location
         if extracted_asset.area:
-            existing_asset.metadata["area"] = extracted_asset.area
+            existing_asset.extra_data["area"] = extracted_asset.area
 
         # Mark as modified
         session.add(existing_asset)
         logger.info(f"Updated existing asset: {existing_asset.name}")
+
+    async def update_asset_value(
+        self, asset_id: int, new_value: float, session: Session | None = None
+    ) -> UserAsset | None:
+        """
+        Update the value of a specific asset by ID.
+        Useful when an external valuation service provides a more accurate value.
+        """
+        if session is None:
+            async for s in get_db_session():
+                return await self._update_asset_value_in_session(asset_id, new_value, s)
+        else:
+            return await self._update_asset_value_in_session(asset_id, new_value, session)
+
+    async def _update_asset_value_in_session(
+        self, asset_id: int, new_value: float, session: Session
+    ) -> UserAsset | None:
+        """Internal helper to update asset value in session"""
+        try:
+            statement = select(UserAsset).where(UserAsset.id == asset_id)
+            result = await session.execute(statement)
+            asset = result.scalar_one_or_none()
+
+            if not asset:
+                logger.warning(f"Asset with ID {asset_id} not found for update")
+                return None
+
+            old_value = asset.value
+            asset.value = new_value
+            asset.updated_at = datetime.now()
+            
+            # Update metadata to reflect source of update
+            if not asset.extra_data:
+                asset.extra_data = {}
+            # Use extra_data for legacy compatibility if metadata not available on model
+            # Note: UserAsset model has 'extra_data' (JSON), not 'metadata' field directly visible in some views
+            # But the code above uses asset.metadata which might be an alias or dynamic attr?
+            # Looking at UserAsset definition: extra_data: dict | None = Field(sa_type=JSON...)
+            # The existing code in _update_asset_from_extracted uses asset.metadata. 
+            # Wait, let's check UserAsset definition again. 
+            # It has 'extra_data'. The 'metadata' access in _update_asset_from_extracted might be wrong or I missed a property.
+            # Actually, looking at `_create_asset_from_extracted`, it passed `metadata=metadata` to constructor?
+            # Let me check UserAsset model again.
+            # UserAsset has: id, user_id, asset_type, name, value, is_confirmed, extra_data...
+            # Ah, `_create_asset_from_extracted` uses 'metadata' arg... but UserAsset definition shows `extra_data`.
+            # If `UserAsset` doesn't have `metadata` field, the existing code `asset.metadata` would fail unless it's a property.
+            # I should use `extra_data`.
+            
+            if not asset.extra_data:
+                asset.extra_data = {}
+                
+            asset.extra_data.update({
+                "last_valuation_update": datetime.now().isoformat(),
+                "valuation_source": "system_valuation",
+                "previous_value": old_value
+            })
+
+            session.add(asset)
+            await session.commit()
+            await session.refresh(asset)
+            
+            logger.info(f"Updated asset {asset_id} value: {old_value} -> {new_value}")
+            return asset
+            
+        except Exception as e:
+            logger.error(f"Error updating asset {asset_id}: {e}")
+            await session.rollback()
+            return None
 
     async def update_user_state(self, user_id: int, extraction_result: dict) -> bool:
         """
@@ -347,22 +479,77 @@ class AssetExtractionService:
                     logger.warning(f"Unknown asset type: {asset_type_str}")
                     continue
                 
-                amount = asset_data.get("amount", 1)  # Default to 1 to satisfy constraint
-                if amount is None or amount <= 0:
-                    amount = 1  # Use 1 as placeholder for assets without known value
+                # FIXED: Try to get 'value' first (correct field from extraction), then 'amount'
+                raw_value = asset_data.get("value")
+                if raw_value is None:
+                    raw_value = asset_data.get("amount")
+                
                 name = asset_data.get("name", f"{asset_type_str}资产")
                 location = asset_data.get("location")
+                # Fallback to metadata if location is missing
+                if not location and isinstance(asset_data.get("metadata"), dict):
+                    location = asset_data.get("metadata").get("location")
+                
                 area = asset_data.get("area")
+
+                # Default to 0.0 if no value provided (better than 1 placeholder)
+                amount = float(raw_value) if raw_value is not None else 0.0
+                if amount < 0:
+                    amount = 0.0
+                
+                # FIXED: Auto-valuation for Real Estate if amount is 0
+                valuation_source = "extraction"
+                if asset_type == AssetType.REAL_ESTATE and amount <= 0:
+                    try:
+                        from app.services.property_valuation import get_property_valuation_service
+                        valuation_service = get_property_valuation_service()
+                        
+                        # Generate location string for valuation
+                        val_location = location or name or ""
+                        if "市" not in val_location and "区" not in val_location:
+                             val_location = f"{val_location} (Unknown City)"
+                        
+                        valuation = await valuation_service.get_market_value(
+                            location=val_location,
+                            area=area if area and area > 0 else 100,
+                            property_type="residential"
+                        )
+                        if valuation.value > 0:
+                            amount = valuation.value
+                            valuation_source = f"auto_{valuation.source}"
+                            logger.info(f"🏠 Auto-valued UserAsset '{name}': {amount} (source={valuation_source})")
+                    except Exception as e:
+                        logger.warning(f"Failed to auto-value UserAsset '{name}': {e}")
                 
                 # FIXED: Improved duplicate detection with fine-grained matching
+                # Create temp ExtractedAsset for matching
+                temp_extracted_asset = ExtractedAsset(
+                     asset_type=asset_type_str,
+                     name=name,
+                     value=amount,
+                     extracted_from="update_user_state",
+                     location=location,
+                     area=area,
+                     confidence=0.9
+                )
+                
                 existing_asset = await self._find_similar_asset(
-                    user_id, asset_type, name, location, area, session
+                    user_id, temp_extracted_asset, session
                 )
                 
                 if existing_asset:
                     # Update existing asset
-                    logger.info(f"Found similar asset (id={existing_asset.id}), updating instead of creating new")
-                    existing_asset.value = amount
+                    logger.info(f"[Workflow:AssetCollection] Step 2.2: Found similar asset (id={existing_asset.id}), updating instead of creating new")
+                    
+                    # FIXED: Only update value if we have a valid non-zero amount
+                    # This prevents background extraction (which often misses value) from overwriting 
+                    # values set by synchronous extraction or user input
+                    if amount > 0:
+                        existing_asset.value = amount
+                        logger.info(f"Updated existing asset value: {name} = {amount}")
+                    else:
+                        logger.info(f"Skipping value update for {name} (amount={amount}), keeping original: {existing_asset.value}")
+                        
                     existing_asset.name = name
                     
                     # Update metadata
@@ -374,10 +561,14 @@ class AssetExtractionService:
                     if area:
                         existing_asset.extra_data["area"] = area
                     
+                    # Record valuation source if auto-valued
+                    if valuation_source != "extraction":
+                        existing_asset.extra_data["valuation_source"] = valuation_source
+                        existing_asset.extra_data["last_valuation_update"] = datetime.now().isoformat()
+                    
                     existing_asset.extra_data["last_updated"] = datetime.now().isoformat()
                     existing_asset.updated_at = datetime.now()
                     session.add(existing_asset)
-                    logger.info(f"Updated existing asset: {name} = {amount}")
                     
                 else:
                     # Create new asset
@@ -386,6 +577,12 @@ class AssetExtractionService:
                         extra_data["location"] = location
                     if area:
                         extra_data["area"] = area
+                        
+                    # Record valuation source if auto-valued
+                    if valuation_source != "extraction":
+                        extra_data["valuation_source"] = valuation_source
+                        extra_data["last_valuation_update"] = datetime.now().isoformat()
+                        
                     extra_data["created_from_extraction"] = True
                     extra_data["extraction_timestamp"] = datetime.now().isoformat()
                     
@@ -399,83 +596,12 @@ class AssetExtractionService:
                     )
                     
                     session.add(new_asset)
-                    logger.info(f"Created new asset: {name} = {amount}")
+                    logger.info(f"[Workflow:AssetCollection] Step 2.2: Created new asset: {name} = {amount}")
                     
             except Exception as e:
                 logger.error(f"Error processing asset {asset_data}: {e}")
                 continue
     
-    async def _find_similar_asset(
-        self, 
-        user_id: int, 
-        asset_type: AssetType, 
-        name: str,
-        location: str | None,
-        area: float | None,
-        session: Session
-    ) -> UserAsset | None:
-        """
-        Find similar existing asset with fine-grained matching logic.
-        
-        Matching strategy:
-        - For real estate: match by location OR area (within 10 sqm) OR name similarity
-        - For other types: match by name similarity (fuzzy match)
-        
-        Returns the most similar asset or None if no match found.
-        """
-        try:
-            # Query all assets of the same type for this user
-            statement = select(UserAsset).where(
-                UserAsset.user_id == user_id,
-                UserAsset.asset_type == asset_type
-            )
-            result = await session.execute(statement)
-            existing_assets = result.scalars().all()
-            
-            if not existing_assets:
-                return None
-            
-            # Special matching logic for real estate
-            if asset_type == AssetType.REAL_ESTATE:
-                for asset in existing_assets:
-                    asset_location = asset.extra_data.get("location") if asset.extra_data else None
-                    asset_area = asset.extra_data.get("area") if asset.extra_data else None
-                    
-                    # Match by location (exact or substring match)
-                    if location and asset_location:
-                        # Normalize locations for comparison
-                        location_normalized = location.replace(" ", "").lower()
-                        asset_location_normalized = asset_location.replace(" ", "").lower()
-                        
-                        if (location_normalized in asset_location_normalized or 
-                            asset_location_normalized in location_normalized):
-                            logger.info(f"Matched real estate by location: '{location}' ~ '{asset_location}'")
-                            return asset
-                    
-                    # Match by area (within 10 sqm tolerance)
-                    if area and asset_area:
-                        if abs(area - asset_area) < 10:
-                            logger.info(f"Matched real estate by area: {area} ~ {asset_area}")
-                            return asset
-                    
-                    # Match by name similarity
-                    if self._is_name_similar(name, asset.name):
-                        logger.info(f"Matched real estate by name: '{name}' ~ '{asset.name}'")
-                        return asset
-            
-            # For other asset types, match by name similarity
-            else:
-                for asset in existing_assets:
-                    if self._is_name_similar(name, asset.name):
-                        logger.info(f"Matched {asset_type.value} by name: '{name}' ~ '{asset.name}'")
-                        return asset
-            
-            # No match found
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error finding similar asset: {e}")
-            return None
     
     def _is_name_similar(self, name1: str, name2: str) -> bool:
         """
@@ -767,6 +893,41 @@ class AssetExtractionService:
             logger.info(f"UserProfile changes will be committed for user {user_id}")
         else:
             logger.info(f"No UserProfile updates needed for user {user_id}")
+
+    async def get_user_assets(self, user_id: int) -> list[dict[str, Any]]:
+        """
+        Get all assets for a user in a format suitable for Context.
+        Used to refresh context after synchronous extraction.
+        
+        Args:
+            user_id: The user ID
+            
+        Returns:
+            list[dict]: List of asset dictionaries
+        """
+        from app.core.database import get_db_session
+        
+        try:
+            async for session in get_db_session():
+                statement = select(UserAsset).where(UserAsset.user_id == user_id)
+                result = await session.execute(statement)
+                assets = result.scalars().all()
+                
+                return [
+                    {
+                        "id": asset.id,
+                        "type": asset.asset_type.value,
+                        "name": asset.name,
+                        "value": asset.value,
+                        "is_confirmed": asset.is_confirmed,
+                        "extra_data": asset.extra_data,
+                    }
+                    for asset in assets
+                ]
+        except Exception as e:
+            logger.error(f"Error getting user assets: {e}")
+            return []
+        return []
 
     async def get_extraction_summary(self, user_id: int) -> dict[str, Any]:
         """Get summary of extracted information for a user"""

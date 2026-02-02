@@ -42,14 +42,17 @@ class LLMProvider(ABC):
     async def generate_stream(
         self, 
         messages: list[dict[str, str]], 
-        system_prompt: str
-    ) -> AsyncIterator[str]:
+        system_prompt: str,
+        tools: list[dict] | None = None,
+        **kwargs
+    ) -> AsyncIterator[str | dict]:
         """
         Generate streaming response from LLM.
         
         Args:
             messages: List of message dicts with 'role' and 'content'
             system_prompt: System instruction for the LLM
+            **kwargs: Additional parameters (e.g. temperature)
             
         Yields:
             str: Response chunks (already filtered for <Thought> blocks)
@@ -60,7 +63,9 @@ class LLMProvider(ABC):
     async def generate(
         self, 
         messages: list[dict[str, str]], 
-        system_prompt: str
+        system_prompt: str,
+        tools: list[dict] | None = None,
+        **kwargs
     ) -> str:
         """
         Generate complete response from LLM (non-streaming).
@@ -133,31 +138,85 @@ class DeepSeekProvider(LLMProvider):
     async def generate_stream(
         self, 
         messages: list[dict[str, str]], 
-        system_prompt: str
-    ) -> AsyncIterator[str]:
+        system_prompt: str,
+        tools: list[dict] | None = None,
+        **kwargs
+    ) -> AsyncIterator[str | dict]:
         """Generate streaming response using DeepSeek."""
         try:
             # Build full message list with system prompt
             full_messages = [{"role": "system", "content": system_prompt}] + messages
             
-            # Collect all chunks first to filter thought blocks
-            response_chunks = []
+            # --- DEBUG LOGGING START ---
+            import json
+            try:
+                logger.info("="*60)
+                logger.info("📤 [LLM REQUEST] SENDING TO DEEPSEEK:")
+                logger.info(f"📝 System Prompt Output:\n{system_prompt}")
+                logger.info(f"💬 Messages:\n{json.dumps(messages, ensure_ascii=False, indent=2)}")
+                if tools:
+                    t_names = []
+                    for t in tools:
+                        if isinstance(t, dict):
+                             t_names.append(t.get('function', {}).get('name', 'Unknown'))
+                        elif hasattr(t, '__name__'):
+                             t_names.append(t.__name__)
+                        else:
+                             t_names.append(str(t))
+                    logger.info(f"🛠️ Tools Provided ({len(tools)}): {t_names}")
+                logger.info("="*60)
+            except Exception as log_err:
+                logger.warning(f"Failed to log LLM request: {log_err}")
+            # --- DEBUG LOGGING END ---
             
-            async for chunk in self.llm.astream(full_messages):
-                if hasattr(chunk, "content") and chunk.content:
-                    response_chunks.append(chunk.content)
+            # Apply Request-level overrides (e.g. temperature)
+            # Create a bound LLM if parameters are provided
+            llm_to_use = self.llm
+            if kwargs:
+                llm_to_use = self.llm.bind(**kwargs)
             
-            # Filter thought blocks from complete response
-            full_response = "".join(response_chunks)
-            filtered_response, thought_content = self._filter_thought_blocks(full_response)
+            # Bind tools if provided
+            if tools:
+                llm_to_use = llm_to_use.bind_tools(tools)
             
-            # Log thought content for debugging
-            if thought_content:
-                logger.info(f"🧠 CHAIN OF THOUGHT:\n{thought_content}")
             
-            # Yield filtered response
-            if filtered_response:
-                yield filtered_response
+            # Collect all chunks to properly handle thought blocks and tool calls
+            final_chunk = None
+            
+            async for chunk in llm_to_use.astream(full_messages):
+                if final_chunk is None:
+                    final_chunk = chunk
+                else:
+                    final_chunk += chunk
+            
+            if final_chunk:
+                # --- DEBUG LOGGING START ---
+                try:
+                    logger.info("="*60)
+                    logger.info("📥 [LLM RESPONSE] RECEIVED FROM DEEPSEEK:")
+                    if hasattr(final_chunk, "content") and final_chunk.content:
+                         logger.info(f"📝 Raw Content:\n{final_chunk.content}")
+                    if hasattr(final_chunk, "tool_calls") and final_chunk.tool_calls:
+                         logger.info(f"🛠️ Tool Calls:\n{final_chunk.tool_calls}")
+                    logger.info("="*60)
+                except Exception as log_err:
+                    logger.error(f"Failed to log LLM response: {log_err}")
+                # --- DEBUG LOGGING END ---
+
+                # 1. Handle Text Content
+                if hasattr(final_chunk, "content") and final_chunk.content:
+                     filtered_response, thought_content = self._filter_thought_blocks(final_chunk.content)
+                     
+                     if thought_content:
+                        logger.info(f"🧠 CHAIN OF THOUGHT:\n{thought_content}")
+                        
+                     if filtered_response:
+                        yield filtered_response
+                
+                # 2. Handle Tool Calls
+                if hasattr(final_chunk, "tool_calls") and final_chunk.tool_calls:
+                    for tool_call in final_chunk.tool_calls:
+                        yield tool_call
                 
         except Exception as e:
             logger.error(f"DeepSeek API error: {e}")
@@ -166,13 +225,60 @@ class DeepSeekProvider(LLMProvider):
     async def generate(
         self, 
         messages: list[dict[str, str]], 
-        system_prompt: str
+        system_prompt: str,
+        tools: list[dict] | None = None,
+        **kwargs
     ) -> str:
         """Generate complete response using DeepSeek."""
         try:
             full_messages = [{"role": "system", "content": system_prompt}] + messages
             
-            response = await self.llm.ainvoke(full_messages)
+            # --- DEBUG LOGGING START ---
+            import json
+            try:
+                logger.info("="*60)
+                logger.info("📤 [LLM REQUEST] SENDING TO DEEPSEEK (Non-streaming):")
+                logger.info(f"📝 System Prompt Output:\n{system_prompt}")
+                logger.info(f"💬 Messages:\n{json.dumps(messages, ensure_ascii=False, indent=2)}")
+                if tools:
+                    t_names = []
+                    for t in tools:
+                        if isinstance(t, dict):
+                                t_names.append(t.get('function', {}).get('name', 'Unknown'))
+                        elif hasattr(t, '__name__'):
+                                t_names.append(t.__name__)
+                        else:
+                                t_names.append(str(t))
+                    logger.info(f"🛠️ Tools Provided ({len(tools)}): {t_names}")
+                logger.info("="*60)
+            except Exception as log_err:
+                logger.warning(f"Failed to log LLM request: {log_err}")
+            # --- DEBUG LOGGING END ---
+            
+            # Apply Request-level overrides (e.g. temperature)
+            llm_to_use = self.llm
+            if kwargs:
+                llm_to_use = self.llm.bind(**kwargs)
+
+            # Bind tools if provided
+            if tools:
+                llm_to_use = llm_to_use.bind_tools(tools)
+            
+            
+            response = await llm_to_use.ainvoke(full_messages)
+            
+            # --- DEBUG LOGGING START ---
+            try:
+                logger.info("="*60)
+                logger.info("📥 [LLM RESPONSE] RECEIVED FROM DEEPSEEK (Non-streaming):")
+                if hasattr(response, "content") and response.content:
+                        logger.info(f"📝 Raw Content:\n{response.content}")
+                if hasattr(response, "tool_calls") and response.tool_calls:
+                        logger.info(f"🛠️ Tool Calls:\n{response.tool_calls}")
+                logger.info("="*60)
+            except Exception as log_err:
+                logger.error(f"Failed to log LLM response: {log_err}")
+            # --- DEBUG LOGGING END ---
             
             if hasattr(response, "content"):
                 filtered_response, thought_content = self._filter_thought_blocks(response.content)
@@ -202,8 +308,10 @@ class MockLLMProvider(LLMProvider):
     async def generate_stream(
         self, 
         messages: list[dict[str, str]], 
-        system_prompt: str
-    ) -> AsyncIterator[str]:
+        system_prompt: str,
+        tools: list[dict] | None = None,
+        **kwargs
+    ) -> AsyncIterator[str | dict]:
         """Generate mock streaming response."""
         # Get the last user message
         user_message = ""
@@ -215,6 +323,12 @@ class MockLLMProvider(LLMProvider):
         # Generate mock response
         response = self._generate_mock_response(user_message)
         
+        if response == "MOCK_TOOL_VALUATION":
+             # This block handles the mock trigger for tool calls
+             # For production/cleanup, we remove the implementation but keep the check if needed?
+             # No, remove it entirely as requested.
+             pass 
+             
         # Simulate streaming by yielding chunks
         words = response.split()
         for i in range(0, len(words), 3):  # Yield 3 words at a time
@@ -225,7 +339,9 @@ class MockLLMProvider(LLMProvider):
     async def generate(
         self, 
         messages: list[dict[str, str]], 
-        system_prompt: str
+        system_prompt: str,
+        tools: list[dict] | None = None,
+        **kwargs
     ) -> str:
         """Generate complete mock response."""
         user_message = ""

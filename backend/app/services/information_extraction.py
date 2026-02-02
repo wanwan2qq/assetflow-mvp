@@ -1,5 +1,5 @@
 """
-LLM-based information extraction for asset and user profile data
+LLM-based information extraction for extraction and user profile data
 Refactored to use modular prompts and configuration-driven approach
 Enhanced with Standard & Poor's 4-quadrant model support
 """
@@ -10,10 +10,11 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
+from app.core.dependencies import get_llm_provider
+from app.services.llm_caller import MockLLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -61,30 +62,7 @@ class InformationExtractor:
 
     def __init__(self):
         """Initialize the LLM-based extractor"""
-        # Check if we have a valid OpenAI API key
-        self.has_real_openai_key = (
-            settings.OPENAI_API_KEY
-            and not settings.OPENAI_API_KEY.startswith("sk-mock")
-            and settings.OPENAI_API_KEY != "mock-key"
-        )
-
-        if not self.has_real_openai_key:
-            logger.warning(
-                "No valid OpenAI API key - extraction will use fallback mode"
-            )
-            self.llm = None
-        else:
-            # Initialize LLM for extraction
-            llm_kwargs = {
-                "model": "deepseek-chat",
-                "temperature": 0.1,  # Low temperature for consistent extraction
-                "api_key": settings.OPENAI_API_KEY,
-            }
-
-            if settings.OPENAI_API_BASE:
-                llm_kwargs["base_url"] = settings.OPENAI_API_BASE
-
-            self.llm = ChatOpenAI(**llm_kwargs)
+        self.llm = get_llm_provider()
 
     async def extract_information_from_conversation(
         self, text: str, conversation_history: list[dict] | None = None
@@ -99,8 +77,8 @@ class InformationExtractor:
         Returns:
             Tuple of (assets, user_profile, validation_result)
         """
-        if not self.llm:
-            # Fallback to simple extraction when LLM is not available
+        if isinstance(self.llm, MockLLMProvider):
+            # Fallback to simple extraction when LLM is not available or mock
             return await self._fallback_extraction(text)
 
         try:
@@ -119,22 +97,42 @@ class InformationExtractor:
             return await self._fallback_extraction(text)
 
     async def _extract_assets(
+
         self, user_message: str, conversation_history: list[dict]
     ) -> list[ExtractedAsset]:
         """Extract assets using specialized asset extraction prompt with enhanced error handling"""
         try:
-            prompt = self._build_asset_extraction_prompt(user_message, conversation_history)
-            response = await self.llm.ainvoke(prompt)
+            from app.core.prompt_manager import prompt_manager
+
+            # Build conversation context
+            context_str = self._build_context_string(conversation_history)
+
+            system_instruction = prompt_manager.render(
+                category="extraction",
+                filename="asset_extraction",
+                key="system_instruction"
+            )
+
+            user_instruction = prompt_manager.render(
+                category="extraction",
+                filename="asset_extraction",
+                key="user_instruction",
+                context_str=context_str,
+                user_message=user_message
+            )
+            
+            response_content = await self.llm.generate(
+                messages=[{"role": "user", "content": user_instruction}],
+                system_prompt=system_instruction,
+                temperature=0.1
+            )
             
             # Enhanced response validation
-            if not response or not response.content:
+            if not response_content:
                 logger.warning("Asset extraction: Empty response from LLM")
                 return []
             
-            response_content = response.content.strip()
-            if not response_content:
-                logger.warning("Asset extraction: Empty content after strip")
-                return []
+            response_content = response_content.strip()
             
             # Try to clean up response if it contains markdown code blocks
             if "```json" in response_content:
@@ -151,22 +149,25 @@ class InformationExtractor:
             # Parse JSON with better error handling
             try:
                 result = json.loads(response_content)
+                # Handle structure: expect list directly or dict with 'assets' key
+                assets_data = []
+                if isinstance(result, list):
+                    assets_data = result
+                elif isinstance(result, dict):
+                    assets_data = result.get("assets", [])
+                    if not assets_data and "assets" not in result:
+                         # Maybe the dict itself is an asset? unlikely based on prompt
+                         assets_data = [result]
+                
+                return self._parse_assets(assets_data, user_message)
+                
             except json.JSONDecodeError as json_err:
                 logger.error(f"Asset extraction JSON parse error: {json_err}")
                 logger.error(f"Raw response content: {response_content[:200]}...")
-                
-                # Fallback: try to extract assets using regex patterns
-                logger.info("Attempting fallback asset extraction using regex patterns")
                 return self._fallback_asset_extraction(user_message)
-            
-            assets = self._parse_assets(result.get("assets", []), user_message)
-            
-            logger.info(f"Asset extraction successful: {len(assets)} assets found")
-            return assets
-            
+                
         except Exception as e:
             logger.error(f"Error in asset extraction: {e}")
-            logger.error(f"Attempting fallback asset extraction")
             return self._fallback_asset_extraction(user_message)
 
     async def _extract_profile(
@@ -174,20 +175,37 @@ class InformationExtractor:
     ) -> ExtractedUserProfile | None:
         """Extract user profile using specialized profile extraction prompt with enhanced error handling"""
         try:
-            prompt = self._build_profile_extraction_prompt(user_message, conversation_history)
-            response = await self.llm.ainvoke(prompt)
+            from app.core.prompt_manager import prompt_manager
+
+            # Build conversation context
+            context_str = self._build_context_string(conversation_history)
+
+            system_instruction = prompt_manager.render(
+                category="extraction",
+                filename="profile_extraction",
+                key="system_instruction"
+            )
+
+            user_instruction = prompt_manager.render(
+                category="extraction",
+                filename="profile_extraction",
+                key="user_instruction",
+                context_str=context_str,
+                user_message=user_message
+            )
             
-            # Enhanced response validation
-            if not response or not response.content:
-                logger.warning("Profile extraction: Empty response from LLM")
-                return None
+            response_content = await self.llm.generate(
+                messages=[{"role": "user", "content": user_instruction}],
+                system_prompt=system_instruction,
+                temperature=0.1
+            )
             
-            response_content = response.content.strip()
             if not response_content:
-                logger.warning("Profile extraction: Empty content after strip")
                 return None
+                
+            response_content = response_content.strip()
             
-            # Try to clean up response if it contains markdown code blocks
+            # Clean up markdown
             if "```json" in response_content:
                 json_start = response_content.find("```json") + 7
                 json_end = response_content.find("```", json_start)
@@ -199,25 +217,22 @@ class InformationExtractor:
                 if json_end > json_start:
                     response_content = response_content[json_start:json_end].strip()
             
-            # Parse JSON with better error handling
+            # Parse profile
             try:
                 result = json.loads(response_content)
-            except json.JSONDecodeError as json_err:
-                logger.error(f"Profile extraction JSON parse error: {json_err}")
-                logger.error(f"Raw response content: {response_content[:200]}...")
+                # Handle structure: expect dict with 'profile' key or flat dict
+                profile_data = result.get("profile", {})
+                if not profile_data and isinstance(result, dict):
+                    # Check if result looks like a profile itself
+                    if any(k in result for k in ["age_range", "risk_preference", "occupation"]):
+                        profile_data = result
                 
-                # Fallback: try to extract profile using regex patterns
-                logger.info("Attempting fallback profile extraction using regex patterns")
+                return self._parse_profile(profile_data, user_message)
+            except json.JSONDecodeError:
                 return self._fallback_profile_extraction(user_message)
-            
-            profile = self._parse_profile(result.get("profile", {}), user_message)
-            
-            logger.info(f"Profile extraction successful: {profile is not None}")
-            return profile
-            
+                
         except Exception as e:
             logger.error(f"Error in profile extraction: {e}")
-            logger.error(f"Attempting fallback profile extraction")
             return self._fallback_profile_extraction(user_message)
 
     async def _detect_intent(
@@ -225,20 +240,37 @@ class InformationExtractor:
     ) -> dict[str, Any]:
         """Detect user intent using specialized intent detection prompt with enhanced error handling"""
         try:
-            prompt = self._build_intent_detection_prompt(user_message, conversation_history)
-            response = await self.llm.ainvoke(prompt)
+            from app.core.prompt_manager import prompt_manager
+
+            # Build conversation context
+            context_str = self._build_context_string(conversation_history)
+
+            system_instruction = prompt_manager.render(
+                category="extraction",
+                filename="intent_detection",
+                key="system_instruction"
+            )
+
+            user_instruction = prompt_manager.render(
+                category="extraction",
+                filename="intent_detection",
+                key="user_instruction",
+                context_str=context_str,
+                user_message=user_message
+            )
             
-            # Enhanced response validation
-            if not response or not response.content:
-                logger.warning("Intent detection: Empty response from LLM")
-                return {"primary_intent": "new_info", "confidence": 0.5}
+            response_content = await self.llm.generate(
+                messages=[{"role": "user", "content": user_instruction}],
+                system_prompt=system_instruction,
+                temperature=0.1
+            )
             
-            response_content = response.content.strip()
             if not response_content:
-                logger.warning("Intent detection: Empty content after strip")
-                return {"primary_intent": "new_info", "confidence": 0.5}
+                return {"primary_intent": "new_info", "confidence": 0.0}
+                
+            response_content = response_content.strip()
             
-            # Try to clean up response if it contains markdown code blocks
+            # Clean up markdown
             if "```json" in response_content:
                 json_start = response_content.find("```json") + 7
                 json_end = response_content.find("```", json_start)
@@ -250,21 +282,19 @@ class InformationExtractor:
                 if json_end > json_start:
                     response_content = response_content[json_start:json_end].strip()
             
-            # Parse JSON with better error handling
+            # Parse intent
             try:
                 result = json.loads(response_content)
-            except json.JSONDecodeError as json_err:
-                logger.error(f"Intent detection JSON parse error: {json_err}")
-                logger.error(f"Raw response content: {response_content[:200]}...")
+                # Handle structure: expect dict with 'intent' key or flat dict
+                intent_data = result.get("intent", {})
+                if not intent_data and isinstance(result, dict):
+                    if "primary_intent" in result:
+                        intent_data = result
                 
-                # Fallback: simple intent detection
+                return intent_data
+            except json.JSONDecodeError:
                 return self._fallback_intent_detection(user_message)
-            
-            intent_data = result.get("intent", {})
-            
-            logger.info(f"Intent detection successful: {intent_data.get('primary_intent', 'unknown')}")
-            return intent_data
-            
+                
         except Exception as e:
             logger.error(f"Error in intent detection: {e}")
             return self._fallback_intent_detection(user_message)

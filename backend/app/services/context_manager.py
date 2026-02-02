@@ -338,6 +338,36 @@ class ContextManager:
                     logger.warning(f"Could not load RealEstateAssets: {e}")
                     context.real_estate_assets = []
                 
+                # Load Conversation History (Critical fix for cache expiry)
+                try:
+                    from app.services.chat_history_service import get_chat_history_service
+                    chat_service = get_chat_history_service()
+                    
+                    # Load recent 20 messages
+                    # Note: We create a temporary service instance if needed, or use the global one
+                    # Since get_chat_history_service returns a global instance, it's safe
+                    
+                    # We need to await this, but ChatHistoryService.get_chat_history is async
+                    # However, we are inside an async generator context (get_db_session)
+                    # We should be careful not to reuse the outer session if the service manages its own
+                    # ChatHistoryService manages its own session, so it's safe to call
+                    
+                    recent_messages = await chat_service.get_chat_history(user_id, limit=20)
+                    
+                    context.conversation_history = [
+                        {
+                            "role": msg.role.value,
+                            "content": msg.content,
+                            "timestamp": msg.timestamp.isoformat() if msg.timestamp else None
+                        }
+                        for msg in recent_messages
+                    ]
+                    logger.info(f"Loaded {len(recent_messages)} history messages for user {user_id}")
+                    
+                except Exception as e:
+                    logger.error(f"Error loading chat history: {e}")
+                    context.conversation_history = []
+
                 # Load UserCognition
                 cognition_stmt = select(UserCognition).where(UserCognition.user_id == user_id)
                 cognition_result = await session.execute(cognition_stmt)

@@ -158,6 +158,7 @@ alembic upgrade head
 ```bash
 # 开发模式启动
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 2>&1 | tee backend.log
 
 # 或使用 Docker
 docker-compose up backend

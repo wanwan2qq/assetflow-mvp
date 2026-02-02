@@ -24,17 +24,16 @@ system_instruction: |
   你必须返回合法的 JSON 格式:
   {
       "title": "方案标题",
-      "category": "asset_allocation|insurance|real_estate|investment|debt_management|tax_planning|emergency_fund|education|retirement",
+      "category": "wealth_protection|wealth_growth|real_estate|life_planning|debt_optimization",
       "priority": "high|medium|low",
       "summary": "一句话摘要",
       "steps": [
           {
               "step_number": 1,
-              "action": "具体行动描述",
+              "action": "核心行动 (动宾短语, 如: 购买重疾险)",
+              "description": "详细行动说明和执行指南",
               "expected_outcome": "预期效果",
-              "timeline": "时间建议 (如: 1周内, 1个月内)",
-              "dependencies": ["前置条件"],
-              "resources": ["需要的资源"]
+              "timeline": "时间建议 (如: 1周内, 1个月内)"
           }
       ],
       "expected_benefits": ["预期收益1", "预期收益2"],

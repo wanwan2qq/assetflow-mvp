@@ -95,7 +95,7 @@ class UserAsset(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id", index=True)
     asset_type: AssetType
     name: str = Field(min_length=1, max_length=200)  # 资产名称，如"天通苑北一区"
-    value: float = Field(gt=0)  # 资产价值，必须大于0
+    value: float = Field(ge=0)  # 资产价值，必须大于等于0
     is_confirmed: bool = Field(default=False)  # 是否经用户确认 - tracks if data came from explicit user input
     extra_data: dict | None = Field(
         sa_type=JSON, default=None
@@ -110,8 +110,8 @@ class UserAsset(SQLModel, table=True):
     @classmethod
     def validate_value(cls, v: float) -> float:
         """验证资产价值"""
-        if v <= 0:
-            raise ValueError("资产价值必须大于0")
+        if v < 0:
+            raise ValueError("资产价值必须大于等于0")
         if v > 1e12:  # 1万亿，防止异常大的数值
             raise ValueError("资产价值不能超过1万亿")
         return v

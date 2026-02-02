@@ -6,6 +6,7 @@ import '../../features/auth/presentation/pages/login_page.dart';
 import '../../features/chat/presentation/pages/chat_page.dart';
 import '../../features/dashboard/presentation/pages/dashboard_page.dart';
 import '../../features/profile/presentation/pages/profile_page.dart';
+import '../../features/actions/presentation/pages/action_plans_page.dart';
 import '../navigation/app_navigation.dart';
 
 part 'app_router.g.dart';
@@ -27,6 +28,11 @@ GoRouter appRouter(AppRouterRef ref) {
             path: AppRoutes.chat,
             name: AppRoutes.chatName,
             builder: (context, state) => const ChatPage(),
+          ),
+          GoRoute(
+            path: AppRoutes.actions,
+            name: AppRoutes.actionsName,
+            builder: (context, state) => const ActionPlansPage(),
           ),
           GoRoute(
             path: AppRoutes.dashboard,

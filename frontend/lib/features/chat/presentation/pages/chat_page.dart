@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import '../widgets/connection_status_banner.dart';
 import '../../../../core/services/websocket_service.dart';
 import '../../../../core/providers/auth_provider.dart';
 import '../../../../core/services/chat_history_service.dart';
@@ -15,6 +16,9 @@ import '../../../../shared/widgets/action_card.dart';
 import '../../../../shared/widgets/portfolio_chart.dart';
 import '../../../../shared/widgets/asset_card.dart';
 import '../../../../shared/widgets/product_card.dart';
+import '../../../../shared/widgets/action_plan_card.dart';
+import '../../../../core/models/action_plan.dart';
+import '../../services/card_action_handler.dart';
 
 // UTF-8 safe logging utility
 String _safeLogString(String text, {int maxLength = 100}) {
@@ -52,10 +56,10 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
   
   // Add a state variable to track connection state for UI updates
   WebSocketConnectionState _currentConnectionState = WebSocketConnectionState.disconnected;
+  String? _connectionErrorMessage;
   
   // Grace period for error display to prevent flashing during page loads/tab switches
-  Timer? _connectionTimer;
-  bool _showConnectionError = false;
+
 
   @override
   bool get wantKeepAlive => true;
@@ -70,11 +74,7 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
         _currentConnectionState = webSocketService.connectionState;
       });
       
-      // Start grace period timer if initially disconnected
-      if (webSocketService.connectionState == WebSocketConnectionState.disconnected ||
-          webSocketService.connectionState == WebSocketConnectionState.error) {
-        _startConnectionErrorTimer();
-      }
+
       
       // Load chat history when the page initializes
       _loadChatHistory();
@@ -92,6 +92,13 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
         List<Widget>? widgets;
         if (historyMsg.widgets != null && historyMsg.widgets!.isNotEmpty) {
           widgets = _parseWidgetsFromMetaData(historyMsg.widgets!);
+        }
+        
+        // Also parse widgets from text content (new method)
+        // If there are embedded <WIDGET...> tags, parse them
+        final textWidgets = _parseEmbeddedWidgets(historyMsg.content);
+        if (textWidgets != null) {
+          widgets = [...?widgets, ...textWidgets];
         }
         
         return ChatMessage(
@@ -133,11 +140,23 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
               pricePerSqm: data['area'] != null 
                   ? '${((data['price'] as num?) ?? 0) ~/ (data['area'] as num? ?? 1) / 10000}万/平'
                   : '未知',
-              onConfirm: () {
-                _sendMessage('确认估值 ${(data['price'] as num?)?.toDouble() ?? 0}');
+              onConfirm: () async {
+                await ref.read(cardActionHandlerProvider).handleAction(
+                  context,
+                  actionType: 'confirm_valuation',
+                  data: data,
+                  onSendUserMessage: _sendMessage,
+                  onUpdateUi: () => _loadChatHistory(),
+                );
               },
-              onEdit: () {
-                _sendMessage('我想调整估值');
+              onEdit: () async {
+                await ref.read(cardActionHandlerProvider).handleAction(
+                  context,
+                  actionType: 'edit_valuation',
+                  data: data,
+                  onSendUserMessage: _sendMessage,
+                  onUpdateUi: () => _loadChatHistory(),
+                );
               },
             ),
           );
@@ -193,11 +212,22 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
               riskLevel: data['risk_level'] as String?,
               tags: (data['tags'] as List<dynamic>?)?.cast<String>() ?? [],
               privacyMode: data['privacy_mode'] as bool? ?? false,
-              onTap: () {
-                _sendMessage('告诉我更多关于${data['name'] ?? '这个资产'}的信息');
+              onTap: () async {
+                await ref.read(cardActionHandlerProvider).handleAction(
+                  context,
+                  actionType: 'send_message',
+                  data: {'message': '告诉我更多关于${data['name'] ?? '这个资产'}的信息'},
+                  onSendUserMessage: _sendMessage,
+                );
               },
-              onEdit: () {
-                _sendMessage('我想修改${data['name'] ?? '这个资产'}的信息');
+              onEdit: () async {
+                await ref.read(cardActionHandlerProvider).handleAction(
+                  context,
+                  actionType: 'edit_asset',
+                  data: data,
+                  onSendUserMessage: _sendMessage,
+                  onUpdateUi: () => _loadChatHistory(),
+                );
               },
             ),
           );
@@ -218,13 +248,38 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
               priority: data['priority'] as String? ?? 'medium',
               reason: data['reason'] as String?,
               onTap: () {
-                _sendMessage('我对${data['name'] ?? '这个产品'}感兴趣，请提供更多信息');
+                ref.read(cardActionHandlerProvider).handleAction(
+                  context,
+                  actionType: 'send_message',
+                  data: {'message': '我对${data['name'] ?? '这个产品'}感兴趣，请提供更多信息'},
+                  onSendUserMessage: _sendMessage,
+                );
               },
               onContact: () {
-                _sendMessage('我想联系${data['provider'] ?? '服务商'}咨询${data['name'] ?? '这个产品'}');
+                ref.read(cardActionHandlerProvider).handleAction(
+                  context,
+                  actionType: 'contact_product',
+                  data: data,
+                  onSendUserMessage: _sendMessage,
+                );
               },
             ),
           );
+          break;
+          break;
+          
+        case 'ACTION_PLAN_CARD':
+          final data = widgetData.data;
+          try {
+            final plan = ActionPlan.fromJson(data);
+            widgets.add(
+              ActionPlanCard(
+                plan: plan,
+              ),
+            );
+          } catch (e) {
+            print('❌ Error parsing ActionPlan from history: $e');
+          }
           break;
       }
     }
@@ -268,7 +323,7 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
     _scrollController.dispose();
     _messageSubscription?.cancel();
     _connectionSubscription?.cancel();
-    _connectionTimer?.cancel(); // Cancel grace period timer
+
     super.dispose();
   }
 
@@ -306,40 +361,26 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
         (state) {
           print('🔗 WebSocket state changed to: $state');
           
-          // Handle grace period for error display
-          if (state == WebSocketConnectionState.connected || 
-              state == WebSocketConnectionState.connecting) {
-            // Immediately hide error banner and cancel timer
-            _connectionTimer?.cancel();
+          // Update state for UI
+          if (mounted) {
             setState(() {
               _currentConnectionState = state;
-              _showConnectionError = false;
-              _isConnecting = state == WebSocketConnectionState.connecting;
-            });
-          } else if (state == WebSocketConnectionState.disconnected || 
-                     state == WebSocketConnectionState.error) {
-            // Update state but don't show error immediately - start grace period
-            setState(() {
-              _currentConnectionState = state;
-              _isConnecting = false;
-            });
-            _startConnectionErrorTimer();
-          } else if (state == WebSocketConnectionState.reconnecting) {
-            // Reconnecting - hide error but keep state updated
-            _connectionTimer?.cancel();
-            setState(() {
-              _currentConnectionState = state;
-              _showConnectionError = false;
-              _isConnecting = true;
+              _isConnecting = state == WebSocketConnectionState.connecting || 
+                              state == WebSocketConnectionState.reconnecting;
+              // Clear error message on non-error states
+              if (state != WebSocketConnectionState.error) {
+                _connectionErrorMessage = null;
+              }
             });
           }
           
           // Show snackbar notifications only for errors/issues (success is silent)
-          if (state == WebSocketConnectionState.error) {
-            _showConnectionStatus('连接失败，正在重试...', isError: true);
-          } else if (state == WebSocketConnectionState.reconnecting) {
-            _showConnectionStatus('正在重新连接...', isError: false);
-          }
+          // Removed manual snackbar - now handled by ConnectionStatusBanner
+          // if (state == WebSocketConnectionState.error) {
+          //   _showConnectionStatus('连接失败，正在重试...', isError: true);
+          // } else if (state == WebSocketConnectionState.reconnecting) {
+          //   _showConnectionStatus('正在重新连接...', isError: false);
+          // }
         },
       );
       
@@ -352,7 +393,12 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
         },
         onError: (error) {
           print('❌ WebSocket message error: $error');
-          _showConnectionStatus('消息接收错误: $error', isError: true);
+          // Update error message state
+          if (mounted) {
+            setState(() {
+              _connectionErrorMessage = error.toString();
+            });
+          }
         },
       );
       
@@ -362,7 +408,7 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
       
     } catch (error) {
       print('❌ WebSocket connection failed: $error');
-      _showConnectionStatus('连接失败: $error', isError: true);
+      // Error is handled by connection state stream
     } finally {
       setState(() {
         _isConnecting = false;
@@ -490,7 +536,7 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
         case 'error':
           // Handle error messages
           print('❌ AI Error: $content');
-          _showConnectionStatus('AI错误: $content', isError: true);
+          // _showConnectionStatus('AI错误: $content', isError: true);
           break;
           
         default:
@@ -515,7 +561,7 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
       // Check if this is a UTF-8 encoding error
       if (e.toString().contains('UTF-8') || e.toString().contains('REPLACEMENT CHARACTER')) {
         print('🔧 UTF-8 encoding issue detected, showing user-friendly error');
-        _showConnectionStatus('消息包含特殊字符，已自动处理', isError: false);
+        // _showConnectionStatus('消息包含特殊字符，已自动处理', isError: false);
         
         // Try to extract readable content
         try {
@@ -565,12 +611,15 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
       int productCount = '<WIDGET:PRODUCT_CARD'.allMatches(text).length;
       int actionCount = '<WIDGET:ACTION_CARD'.allMatches(text).length;
       int portfolioCount = '<WIDGET:PORTFOLIO_CHART'.allMatches(text).length;
+
       int assetCount = '<WIDGET:ASSET_CARD'.allMatches(text).length;
+      int actionPlanCount = '<WIDGET:ACTION_PLAN_CARD'.allMatches(text).length;
       
       print('🔍 DEBUG: Widget counts:');
       print('  VALUATION_CARD: $valuationCount');
       print('  PRODUCT_CARD: $productCount');
       print('  ACTION_CARD: $actionCount');
+      print('  ACTION_PLAN_CARD: $actionPlanCount');
       print('  PORTFOLIO_CHART: $portfolioCount');
       print('  ASSET_CARD: $assetCount');
     } else {
@@ -584,97 +633,126 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
     if (text.contains('<WIDGET:VALUATION_CARD')) {
       print('🔍 DEBUG: Processing VALUATION_CARD');
       
-      // Try multiple regex patterns to handle different escaping levels
-      final patterns = [
-        RegExp(r'<WIDGET:VALUATION_CARD data="([^"]*)"'),           // Normal escaping
-        RegExp(r'<WIDGET:VALUATION_CARD data=\\"([^\\"]*)\\""'),    // WebSocket escaping
-        RegExp(r'<WIDGET:VALUATION_CARD data=\\\"([^\\\"]*)\\\""'), // Double escaping
-      ];
+      // Use distinct pattern to find all occurrences
+      final matches = RegExp(r'<WIDGET:VALUATION_CARD data="([^"]*)"').allMatches(text);
+      print('🔍 DEBUG: Found ${matches.length} VALUATION_CARD matches');
       
-      RegExpMatch? match;
-      int patternIndex = -1;
-      
-      for (int i = 0; i < patterns.length; i++) {
-        match = patterns[i].firstMatch(text);
-        if (match != null) {
-          patternIndex = i;
-          print('🔍 DEBUG: Pattern ${i + 1} matched');
-          break;
-        }
-      }
-      
-      if (match != null) {
+      for (final match in matches) {
         try {
           var jsonStr = match.group(1) ?? '{}';
           
-          // Apply appropriate decoding based on pattern
-          if (patternIndex == 0) {
-            // Normal HTML entity decoding
-            jsonStr = jsonStr
-              .replaceAll('&quot;', '"')  // HTML entity decoding
-              .replaceAll('\\"', '"');    // JSON escape decoding
-          } else if (patternIndex == 1) {
-            // WebSocket escaping - handle \" first, then &quot;
-            jsonStr = jsonStr
-              .replaceAll('\\&quot;', '"')  // WebSocket + HTML entity
-              .replaceAll('&quot;', '"')    // Remaining HTML entities
-              .replaceAll('\\"', '"');      // JSON escapes
-          } else {
-            // Double escaping
-            jsonStr = jsonStr
-              .replaceAll('\\\\&quot;', '"')  // Double escaped HTML entities
-              .replaceAll('\\&quot;', '"')    // Single escaped HTML entities
-              .replaceAll('&quot;', '"')      // HTML entities
-              .replaceAll('\\"', '"');        // JSON escapes
+          // ROBUSTNESS FIX: Handle LLM hallucinated JSON (single quotes, etc.)
+          // 1. Unescape HTML entities
+          jsonStr = jsonStr.replaceAll('&quot;', '"');
+          
+          // 2. If it looks like it uses single quotes, try to fix it
+          if (!jsonStr.contains('"') && jsonStr.contains("'")) {
+             print('⚠️ DEBUG: Detected single-quoted JSON, attempting fix');
+             jsonStr = jsonStr.replaceAll("'", '"');
+             // Note: This is a simple heuristic. For complex nested strings it might fail,
+             // but it catches the common {key: 'value'} case.
+             
+             // 3. Handle unquoted keys (simple regex for basic keys)
+             // Matches {key: or , key: and wraps key in quotes
+             jsonStr = jsonStr.replaceAllMapped(
+               RegExp(r'([{,]\s*)([a-zA-Z0-9_]+)(\s*:)'), 
+               (m) => '${m[1]}"${m[2]}"${m[3]}'
+             );
           }
           
-          print('🔍 DEBUG: VALUATION_CARD JSON (pattern ${patternIndex + 1}): ${jsonStr.substring(0, math.min(150, jsonStr.length))}...');
+          print('🔍 DEBUG: VALUATION_CARD JSON: ${jsonStr.substring(0, math.min(150, jsonStr.length))}...');
           final data = json.decode(jsonStr) as Map<String, dynamic>;
           
+          final estimatedValue = (data['price'] as num?)?.toDouble() ?? 0;
+          
+          // heuristic to filter out broken/duplicate tags with 0 value
+          if (estimatedValue <= 0 && data['id'] == null) {
+             print('⚠️ DEBUG: Skipping invalid VALUATION_CARD (0 value, no ID)');
+             continue;
+          }
+
           widgets.add(
             ValuationCard(
               propertyName: data['location'] as String? ?? '房产',
-              estimatedValue: (data['price'] as num?)?.toDouble() ?? 0,
-              pricePerSqm: data['area'] != null 
-                  ? '${((data['price_per_sqm'] as num?) ?? 0).toStringAsFixed(0)}元/平'
+              estimatedValue: estimatedValue,
+              pricePerSqm: data['area'] != null && data['area'] > 0
+                  ? '${((data['price_per_sqm'] as num?) ?? estimatedValue / (data['area'] as num)).toStringAsFixed(0)}元/平'
                   : '未知',
-              onConfirm: () {
-                _sendMessage('确认估值 ${((data['price'] as num?)?.toDouble() ?? 0) / 10000}万');
+              status: data['status'] as String? ?? 'active',
+              onConfirm: () async {
+                await ref.read(cardActionHandlerProvider).handleAction(
+                  context,
+                  actionType: 'confirm_valuation',
+                  data: data,
+                  onSendUserMessage: _sendMessage,
+                  onUpdateUi: () => _loadChatHistory(),
+                );
               },
-              onEdit: () {
-                _sendMessage('我想调整估值');
+              onEdit: () async {
+                await ref.read(cardActionHandlerProvider).handleAction(
+                  context,
+                  actionType: 'edit_valuation',
+                  data: data,
+                  onSendUserMessage: _sendMessage,
+                  onUpdateUi: () => _loadChatHistory(),
+                );
               },
             ),
           );
           print('✅ DEBUG: Successfully created VALUATION_CARD widget');
         } catch (e) {
           print('❌ DEBUG: Error parsing VALUATION_CARD data: $e');
-          print('❌ DEBUG: Raw JSON string: ${match.group(1)}');
-          // Fallback to simple valuation card
+          print('❌ DEBUG: JSON string: ${match.group(1)}');
+          // Only add fallback if we really want to show broken widgets.
+          // Better to skip broken ones if we expect a valid one later?
+          // Let's show it but visually indicate error only in debug logs?
+          // No, user sees "Parsing failed" card.
+          // If we have multiple, maybe one is good.
+          
+          // Strategy: Try to parse. If fail, log it. 
+          // If after checking ALL matches we found NO valid widgets, maybe add a fallback?
+          // Or just add the error card so user knows something happened.
           widgets.add(
-            ValuationCard(
-              propertyName: '房产估值',
+             ValuationCard(
+              propertyName: '数据解析异常',
               estimatedValue: 0,
-              pricePerSqm: '解析失败',
-              onConfirm: () => _sendMessage('确认估值'),
-              onEdit: () => _sendMessage('编辑估值'),
+              pricePerSqm: '格式错误',
+              onConfirm: () async => _sendMessage('确认估值'),
+              onEdit: () async => _sendMessage('编辑估值'),
             ),
           );
         }
-      } else if (text.contains('<WIDGET:VALUATION_CARD>')) {
+      } 
+      
+      // Check for simple tags ONLY if no data tags were found
+      if (matches.isEmpty && text.contains('<WIDGET:VALUATION_CARD>')) {
         print('🔍 DEBUG: Found simple VALUATION_CARD tag');
         // Simple tag without data (legacy support)
         widgets.add(
           ValuationCard(
-            propertyName: '北京天通苑',
-            estimatedValue: 4500000,
-            pricePerSqm: '3.8万/平',
-            onConfirm: () => _sendMessage('确认估值 450万'),
-            onEdit: () => _sendMessage('我想调整估值'),
+            propertyName: '房产估值',
+            estimatedValue: 0,
+            pricePerSqm: '待估价',
+            onConfirm: () async {
+              await ref.read(cardActionHandlerProvider).handleAction(
+                context,
+                actionType: 'confirm_valuation',
+                data: {'price': 0},
+                onSendUserMessage: _sendMessage,
+                onUpdateUi: () => _loadChatHistory(),
+              );
+            },
+            onEdit: () async {
+              await ref.read(cardActionHandlerProvider).handleAction(
+                context,
+                actionType: 'edit_valuation',
+                data: {'price': 0},
+                onSendUserMessage: _sendMessage,
+                onUpdateUi: () => _loadChatHistory(),
+              );
+            },
           ),
         );
-      } else {
-        print('❌ DEBUG: VALUATION_CARD tag found but no pattern matched');
       }
     }
     
@@ -688,7 +766,6 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
         try {
           final jsonStr = match.group(1)
             ?.replaceAll('&quot;', '"')  // HTML entity decoding
-            ?.replaceAll('\\"', '"')     // JSON escape decoding
             ?? '{}';
           print('🔍 DEBUG: ACTION_CARD JSON: ${jsonStr.substring(0, math.min(100, jsonStr.length))}...');
           
@@ -736,6 +813,35 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
           ),
         );
       }
+      }
+
+    
+    // Parse ACTION_PLAN_CARD with JSON data
+    if (text.contains('<WIDGET:ACTION_PLAN_CARD')) {
+      print('🔍 DEBUG: Processing ACTION_PLAN_CARD');
+      final matches = RegExp(r'<WIDGET:ACTION_PLAN_CARD data="([^"]*)"').allMatches(text);
+      print('🔍 DEBUG: Found ${matches.length} ACTION_PLAN_CARD matches');
+      
+      for (final match in matches) {
+        try {
+          final jsonStr = match.group(1)
+            ?.replaceAll('&quot;', '"')  // HTML entity decoding
+            ?? '{}';
+          print('🔍 DEBUG: ACTION_PLAN_CARD JSON: ${jsonStr.substring(0, math.min(100, jsonStr.length))}...');
+          
+          final data = json.decode(jsonStr) as Map<String, dynamic>;
+          final plan = ActionPlan.fromJson(data);
+                    widgets.add(
+              ActionPlanCard(
+                plan: plan,
+              ),
+            );
+          print('✅ DEBUG: Successfully created ACTION_PLAN_CARD widget: ${plan.title}');
+        } catch (e) {
+          print('❌ DEBUG: Error parsing ACTION_PLAN_CARD data: $e');
+          print('❌ DEBUG: Raw JSON string: ${match.group(1)}');
+        }
+      }
     }
     
     // Parse PORTFOLIO_CHART with JSON data
@@ -746,7 +852,6 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
         try {
           final jsonStr = match.group(1)
             ?.replaceAll('&quot;', '"')  // HTML entity decoding
-            ?.replaceAll('\\"', '"')     // JSON escape decoding
             ?? '{}';
           print('🔍 DEBUG: PORTFOLIO_CHART JSON: ${jsonStr.substring(0, math.min(100, jsonStr.length))}...');
           final data = json.decode(jsonStr) as Map<String, dynamic>;
@@ -873,7 +978,6 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
         try {
           final jsonStr = match.group(1)
             ?.replaceAll('&quot;', '"')  // HTML entity decoding
-            ?.replaceAll('\\"', '"')     // JSON escape decoding
             ?? '{}';
           print('🔍 DEBUG: ASSET_CARD JSON: ${jsonStr.substring(0, math.min(100, jsonStr.length))}...');
           final data = json.decode(jsonStr) as Map<String, dynamic>;
@@ -886,11 +990,23 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
               riskLevel: data['risk_level'] as String?,
               tags: (data['tags'] as List<dynamic>?)?.cast<String>() ?? [],
               privacyMode: data['privacy_mode'] as bool? ?? false,
-              onTap: () {
-                _sendMessage('告诉我更多关于${data['name'] ?? '这个资产'}的信息');
+              status: data['status'] as String? ?? 'active',
+              onTap: () async {
+                await ref.read(cardActionHandlerProvider).handleAction(
+                  context,
+                  actionType: 'send_message',
+                  data: {'message': '告诉我更多关于${data['name'] ?? '这个资产'}的信息'},
+                  onSendUserMessage: _sendMessage,
+                );
               },
-              onEdit: () {
-                _sendMessage('我想修改${data['name'] ?? '这个资产'}的信息');
+              onEdit: () async {
+                await ref.read(cardActionHandlerProvider).handleAction(
+                  context,
+                  actionType: 'edit_asset',
+                  data: data,
+                  onSendUserMessage: _sendMessage,
+                  onUpdateUi: () => _loadChatHistory(),
+                );
               },
             ),
           );
@@ -904,8 +1020,13 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
               name: '新增资产',
               value: 0,
               assetType: 'unknown',
-              onTap: () {
-                _sendMessage('告诉我更多关于这个资产的信息');
+              onTap: () async {
+                await ref.read(cardActionHandlerProvider).handleAction(
+                  context,
+                  actionType: 'send_message',
+                  data: {'message': '告诉我更多关于这个资产的信息'},
+                  onSendUserMessage: _sendMessage,
+                );
               },
             ),
           );
@@ -918,8 +1039,13 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
             name: '新增资产',
             value: 0,
             assetType: 'unknown',
-            onTap: () {
-              _sendMessage('告诉我更多关于这个资产的信息');
+            onTap: () async {
+              await ref.read(cardActionHandlerProvider).handleAction(
+                context,
+                actionType: 'send_message',
+                data: {'message': '告诉我更多关于这个资产的信息'},
+                onSendUserMessage: _sendMessage,
+              );
             },
           ),
         );
@@ -1038,33 +1164,7 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
     return widgets.isNotEmpty ? widgets : null;
   }
 
-  void _showConnectionStatus(String message, {required bool isError}) {
-    if (!mounted) return;
-    
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: isError ? Colors.red : Colors.green,
-        duration: Duration(seconds: isError ? 4 : 2),
-      ),
-    );
-  }
 
-  void _startConnectionErrorTimer() {
-    // Cancel any existing timer
-    _connectionTimer?.cancel();
-    
-    // Start 3-second grace period before showing error
-    _connectionTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted && 
-          (_currentConnectionState == WebSocketConnectionState.disconnected ||
-           _currentConnectionState == WebSocketConnectionState.error)) {
-        setState(() {
-          _showConnectionError = true;
-        });
-      }
-    });
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1089,8 +1189,9 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
       // Only connect if not already connected or connecting
       if (authState.value != null && 
           token != null && 
-          connectionState == WebSocketConnectionState.disconnected) {
-        print('🔌 Initial WebSocket connection needed');
+          (connectionState == WebSocketConnectionState.disconnected || 
+           connectionState == WebSocketConnectionState.error)) {
+        print('🔌 Initial WebSocket connection needed (State: $connectionState)');
         print('🆔 Using User ID: ${authState.value!.id}');
         _connectWebSocket(authState.value!.id, token);
       } else {
@@ -1110,9 +1211,10 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
       print('   Current WebSocket state: $currentState');
       
       if (next.value != null && token != null) {
-        // User is logged in with a valid token - connect WebSocket only if not already connected
-        if (currentState == WebSocketConnectionState.disconnected) {
-          print('✅ User logged in, connecting WebSocket...');
+        // User is logged in with a valid token - connect WebSocket if disconnected or error
+        if (currentState == WebSocketConnectionState.disconnected || 
+            currentState == WebSocketConnectionState.error) {
+          print('✅ User logged in, connecting WebSocket... (State: $currentState)');
           print('🆔 Using User ID: ${next.value!.id}');
           WidgetsBinding.instance.addPostFrameCallback((_) {
             _connectWebSocket(next.value!.id, token);
@@ -1168,119 +1270,35 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
       }
     });
     
+    // Determine which messages to show (streamed or full)
+    // Note: handling both efficiently
+    
+
+    
     return Scaffold(
-          appBar: AppBar(
-            title: const Text('AI 资产顾问'),
-            actions: [
-              // Connection status indicator - only show on failure
-              if (_shouldShowConnectionStatus(connectionState))
-                Container(
-                  margin: const EdgeInsets.only(right: 8),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        _getConnectionIcon(connectionState),
-                        color: _getConnectionColor(connectionState),
-                        size: 16,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        _getConnectionText(connectionState),
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: _getConnectionColor(connectionState),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              IconButton(
-                icon: const Icon(Icons.refresh),
-                onPressed: () async {
-                  final webSocketService = ref.read(webSocketServiceProvider);
-                  if (webSocketService.connectionState == WebSocketConnectionState.error) {
-                    await webSocketService.reconnect();
-                  } else {
-                    setState(() {
-                      _messages.clear();
-                    });
-                  }
-                },
-              ),
-            ],
+      backgroundColor: Theme.of(context).colorScheme.background,
+      appBar: AppBar(
+        title: Text(
+          'AI 资产配置顾问',
+          style: TextStyle(
+            color: Theme.of(context).colorScheme.onSurface,
+            fontSize: 18,
+            fontWeight: FontWeight.w600,
           ),
+        ),
+        centerTitle: true,
+        backgroundColor: Theme.of(context).colorScheme.surface,
+        elevation: 0.5,
+        iconTheme: IconThemeData(color: Theme.of(context).colorScheme.onSurface),
+      ),
       body: Column(
         children: [
-          // Connection error/failure banner - only show after grace period
-          if (_showConnectionError && 
-              (connectionState == WebSocketConnectionState.error ||
-               connectionState == WebSocketConnectionState.disconnected))
-            Container(
-              width: double.infinity,
-              margin: const EdgeInsets.all(16),
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.red.shade50,
-                border: Border.all(color: Colors.red.shade200),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(Icons.error, color: Colors.red.shade600, size: 20),
-                      const SizedBox(width: 8),
-                      Text(
-                        connectionState == WebSocketConnectionState.error 
-                            ? '连接失败' 
-                            : '连接已断开',
-                        style: TextStyle(
-                          color: Colors.red.shade600,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    connectionState == WebSocketConnectionState.error
-                        ? 'Token可能已过期，请重新登录后再试'
-                        : '网络连接已断开，请检查网络或重试',
-                    style: TextStyle(color: Colors.red.shade700),
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      if (connectionState == WebSocketConnectionState.error)
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            // 导航到登录页面
-                            Navigator.of(context).pushReplacementNamed('/login');
-                          },
-                          icon: const Icon(Icons.login, size: 16),
-                          label: const Text('重新登录'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.red.shade600,
-                            foregroundColor: Colors.white,
-                          ),
-                        ),
-                      if (connectionState == WebSocketConnectionState.error)
-                        const SizedBox(width: 8),
-                      TextButton.icon(
-                        onPressed: () async {
-                          final webSocketService = ref.read(webSocketServiceProvider);
-                          await webSocketService.reconnect();
-                        },
-                        icon: const Icon(Icons.refresh, size: 16),
-                        label: const Text('重试连接'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
+          // Connection Status Banner
+          ConnectionStatusBanner(
+            connectionState: _currentConnectionState,
+            errorMessage: _connectionErrorMessage,
+          ),
+          
           Expanded(
             child: ListView.builder(
               reverse: true, // Show latest messages at bottom naturally
@@ -1311,11 +1329,11 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
                     key: const Key('chat_input'),
                     controller: _messageController,
                     decoration: InputDecoration(
-                      hintText: connectionState == WebSocketConnectionState.connected 
+                      hintText: _currentConnectionState == WebSocketConnectionState.connected 
                           ? '输入您的资产信息...' 
                           : '等待连接...',
                       border: const OutlineInputBorder(),
-                      enabled: connectionState == WebSocketConnectionState.connected,
+                      enabled: _currentConnectionState == WebSocketConnectionState.connected,
                     ),
                     maxLines: null,
                     onSubmitted: (_) => _sendMessage(),
@@ -1324,7 +1342,7 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
                 const SizedBox(width: 8),
                 IconButton(
                   key: const Key('send_button'),
-                  onPressed: connectionState == WebSocketConnectionState.connected ? _sendMessage : null,
+                  onPressed: _currentConnectionState == WebSocketConnectionState.connected ? _sendMessage : null,
                   icon: _isConnecting 
                       ? const SizedBox(
                           width: 20,
@@ -1341,67 +1359,9 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
     );
   }
 
-  bool _shouldShowConnectionStatus(WebSocketConnectionState state) {
-    // Only show connection status when there's an actual failure AND grace period has passed
-    // Hide during normal connecting/connected states to keep UI clean
-    if (!_showConnectionError) {
-      return false; // Grace period not elapsed yet
-    }
+
     
-    switch (state) {
-      case WebSocketConnectionState.error:
-        return true; // Authentication or connection error
-      case WebSocketConnectionState.disconnected:
-        return true; // Connection dropped
-      case WebSocketConnectionState.connected:
-      case WebSocketConnectionState.connecting:
-      case WebSocketConnectionState.reconnecting:
-        return false; // Hide during normal operation
-    }
-  }
 
-  IconData _getConnectionIcon(WebSocketConnectionState state) {
-    switch (state) {
-      case WebSocketConnectionState.connected:
-        return Icons.wifi;
-      case WebSocketConnectionState.connecting:
-      case WebSocketConnectionState.reconnecting:
-        return Icons.wifi_off;
-      case WebSocketConnectionState.error:
-        return Icons.error;
-      case WebSocketConnectionState.disconnected:
-        return Icons.wifi_off;
-    }
-  }
-
-  Color _getConnectionColor(WebSocketConnectionState state) {
-    switch (state) {
-      case WebSocketConnectionState.connected:
-        return Colors.green;
-      case WebSocketConnectionState.connecting:
-      case WebSocketConnectionState.reconnecting:
-        return Colors.orange;
-      case WebSocketConnectionState.error:
-        return Colors.red;
-      case WebSocketConnectionState.disconnected:
-        return Colors.grey;
-    }
-  }
-
-  String _getConnectionText(WebSocketConnectionState state) {
-    switch (state) {
-      case WebSocketConnectionState.connected:
-        return '已连接';
-      case WebSocketConnectionState.connecting:
-        return '连接中';
-      case WebSocketConnectionState.reconnecting:
-        return '重连中';
-      case WebSocketConnectionState.error:
-        return '连接失败';
-      case WebSocketConnectionState.disconnected:
-        return '连接已断开'; // More clearly indicates a failure/dropped connection
-    }
-  }
 
   Future<void> _sendMessage([String? text]) async {
     final messageText = text ?? _messageController.text.trim();
@@ -1410,7 +1370,7 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
     final webSocketService = ref.read(webSocketServiceProvider);
     if (!webSocketService.isConnected) {
       print('❌ WebSocket not connected, cannot send message');
-      _showConnectionStatus('未连接到服务器，无法发送消息', isError: true);
+      // Show error in banner logic (by setting state if needed, though usually automatic)
       return;
     }
 
@@ -1456,7 +1416,7 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
       
     } catch (error) {
       print('❌ Failed to send message: $error');
-      _showConnectionStatus('发送消息失败: $error', isError: true);
+      // Error will be logged, and connection state might update if it's a network issue
       
       // 不要删除用户消息，让用户知道消息已发送但可能失败
       // 只在确认发送失败时才删除
@@ -1468,6 +1428,63 @@ class _ChatPageState extends ConsumerState<ChatPage> with AutomaticKeepAliveClie
         });
       }
     }
+  }
+
+
+  void _showEditValuationDialog({required double currentPrice, double? currentArea}) {
+    final priceController = TextEditingController(text: currentPrice.toStringAsFixed(0));
+    
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('调整房产估值'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('请输入修正后的总价（万元）'),
+            const SizedBox(height: 8),
+            TextField(
+              controller: priceController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                suffixText: '万元',
+                border: OutlineInputBorder(),
+                hintText: '例如: 500',
+              ),
+              autofocus: true,
+            ),
+            if (currentArea != null) ...[
+              const SizedBox(height: 16),
+              Text(
+                '注：当前面积 ${currentArea.toStringAsFixed(1)}平米',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final newPrice = double.tryParse(priceController.text);
+              if (newPrice != null && newPrice > 0) {
+                Navigator.pop(context);
+                _sendMessage('修正估值为: ${newPrice}万');
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('请输入有效的金额')),
+                );
+              }
+            },
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -1613,7 +1630,7 @@ class ChatBubble extends StatelessWidget {
           fontStyle: FontStyle.italic,
         ),
       ),
-      selectable: true,
+      selectable: false, // Disabled to prevent scroll gesture conflicts
     );
   }
 }

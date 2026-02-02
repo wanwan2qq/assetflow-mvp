@@ -103,33 +103,54 @@ async def websocket_chat(websocket: WebSocket, user_id: int, token: str = Query(
         # Connect to WebSocket
         await manager.connect(websocket, user_id)
 
+        # Send connection confirmation
+        await websocket.send_text(json.dumps({
+            "type": "connected",
+            "timestamp": "2024-01-01T00:00:00Z"
+        }))
+
         # Get chat agent
         agent = get_chat_agent()
 
-        # Send welcome message
-        welcome_msg = {
-            "type": "system",
-            "content": "欢迎使用AssetFlow！我是您的AI资产配置顾问。请告诉我您的房产情况，我来帮您分析资产配置。",
-            "timestamp": "2024-01-01T00:00:00Z",
-        }
-        try:
-            # Ensure proper UTF-8 encoding for WebSocket messages
-            welcome_json = json.dumps(welcome_msg, ensure_ascii=False)
-            # Validate UTF-8 encoding before sending
-            welcome_json.encode('utf-8')
-            await websocket.send_text(welcome_json)
-        except UnicodeEncodeError as e:
-            logger.error(f"UTF-8 encoding error in welcome message: {e}")
-            # Fallback with ASCII-safe message
-            fallback_msg = {
+        # Check if user has chat history
+        # Only send welcome message if no history exists to avoid spamming on reconnect
+        from app.services.chat_history_service import get_chat_history_service
+        chat_history_service = get_chat_history_service()
+        # Check last 1 message to see if history exists
+        history_exists = await chat_history_service.has_history(user_id)
+        
+        if not history_exists:
+            # Send welcome message
+            welcome_msg = {
                 "type": "system",
-                "content": "欢迎使用AssetFlow！我是您的AI资产配置顾问。",
+                "content": """欢迎使用 AssetFlow！我是您的 AI 资产配置顾问 🤝。
+
+我不仅仅是聊天机器人，我能为您提供深度的财富管理服务：\n\n
+🏠 **房产评估**：结合实时市场数据，精准评估您的房产价值；\n
+📊 **资产配置**：基于标准普尔四象限模型，诊断您的资金分布健康度；\n
+🚀 **行动计划**：根据您的资产现状，生成专属的**财富增值与风控行动方案**。\n\n
+
+我们可以先从了解您的资产情况开始，您目前持有房产、现金或其他投资吗？💡""",
                 "timestamp": "2024-01-01T00:00:00Z",
             }
-            await websocket.send_text(json.dumps(fallback_msg, ensure_ascii=True))
-        except Exception as e:
-            logger.error(f"Failed to send welcome message: {e}")
-            return
+            try:
+                # Ensure proper UTF-8 encoding for WebSocket messages
+                welcome_json = json.dumps(welcome_msg, ensure_ascii=False)
+                # Validate UTF-8 encoding before sending
+                welcome_json.encode('utf-8')
+                await websocket.send_text(welcome_json)
+            except UnicodeEncodeError as e:
+                logger.error(f"UTF-8 encoding error in welcome message: {e}")
+                # Fallback with ASCII-safe message
+                fallback_msg = {
+                    "type": "system",
+                    "content": "欢迎使用AssetFlow！我是您的AI资产配置顾问。",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                }
+                await websocket.send_text(json.dumps(fallback_msg, ensure_ascii=True))
+            except Exception as e:
+                logger.error(f"Failed to send welcome message: {e}")
+                return
 
         # Handle messages
         while True:
@@ -408,6 +429,130 @@ async def get_chat_history(
                 "meta_data": message.meta_data,
                 "timestamp": message.timestamp.isoformat()
             })
+        
+        # Hydrate widgets with current asset data
+        asset_ids = set()
+        for msg in history:
+            if not msg.get("meta_data") or not msg["meta_data"].get("widgets"):
+                continue
+                
+            for widget in msg["meta_data"]["widgets"]:
+                w_type = widget.get("widget_type")
+                w_data = widget.get("data", {})
+                if w_type in ["VALUATION_CARD", "ASSET_CARD"] and w_data.get("id"):
+                    try:
+                        asset_ids.add(int(w_data["id"]))
+                    except (ValueError, TypeError):
+                        pass
+
+            # Fallback: Scan content for IDs if metadata is missing/incomplete
+            # Look for id pattern in the data attribute string: &quot;id&quot;: 123 OR "id": 123
+            if msg.get("content") and "<WIDGET:" in msg["content"]:
+                import re
+                # Match "id": 123 or &quot;id&quot;: 123
+                # We handle both integer and string IDs, but only collect integers effectively 
+                # (since our DB uses int IDs for assets)
+                id_matches = re.finditer(r'(?:&quot;|")id(?:&quot;|")\s*:\s*(\d+)', msg["content"])
+                for match in id_matches:
+                    try:
+                        asset_ids.add(int(match.group(1)))
+                    except (ValueError, TypeError):
+                        pass
+
+        if asset_ids:
+            try:
+                from app.models.user import UserAsset
+                from sqlmodel import select
+                from app.core.database import get_db_session
+
+                # We need a session to query
+                async for session in get_db_session():
+                    stmt = select(UserAsset).where(UserAsset.id.in_(asset_ids))
+                    result = await session.execute(stmt)
+                    current_assets = {asset.id: asset for asset in result.scalars().all()}
+                    
+                    # Update widget data in history
+                    for msg in history:
+                        if not msg.get("meta_data") or not msg["meta_data"].get("widgets"):
+                            continue
+                            
+                        for widget in msg["meta_data"]["widgets"]:
+                            w_type = widget.get("widget_type")
+                            w_data = widget.get("data", {})
+                            a_id = w_data.get("id")
+                            
+                            if a_id and int(a_id) in current_assets:
+                                asset = current_assets[int(a_id)]
+                                # Update fields
+                                w_data["value"] = asset.value
+                                w_data["price"] = asset.value # For ValuationCard compatibility
+                                
+                                # Update status based on confirmation
+                                if asset.is_confirmed:
+                                    w_data["status"] = "completed"
+                                else:
+                                    w_data["status"] = "active"
+                                
+                                if w_type == "VALUATION_CARD":
+                                    # Update derived fields if possible (e.g. price per sqm)
+                                    area = w_data.get("area", 0)
+                                    if area and area > 0:
+                                        w_data["price_per_sqm"] = asset.value / area
+                                
+                                # Update name/location if changed?
+                                if asset.name:
+                                    w_data["name"] = asset.name
+                                if asset.extra_data and asset.extra_data.get("location"):
+                                    w_data["location"] = asset.extra_data.get("location")
+                    
+                    break # Only need one session
+            
+                # Hydrate content strings with fresh data
+                import re
+                
+                def match_replace(match):
+                    try:
+                        w_type = match.group(1)
+                        raw_json = match.group(2).replace('&quot;', '"')
+                        data = json.loads(raw_json)
+                        
+                        a_id = data.get("id")
+                        if a_id and int(a_id) in current_assets:
+                            asset = current_assets[int(a_id)]
+                            
+                            # Update key fields
+                            data["value"] = asset.value
+                            data["price"] = asset.value
+                            data["status"] = "completed" if asset.is_confirmed else "active"
+                            if asset.name:
+                                data["name"] = asset.name
+                                
+                            # Update derived fields 
+                            if w_type == "VALUATION_CARD":
+                                area = data.get("area", 0)
+                                if area and area > 0:
+                                    data["price_per_sqm"] = asset.value / area
+                                    
+                            # Re-serialize
+                            new_json = json.dumps(data, ensure_ascii=False, default=str)
+                            escaped_json = new_json.replace('"', '&quot;')
+                            return f'<WIDGET:{w_type} data="{escaped_json}" />'
+                    except Exception:
+                        pass
+                    return match.group(0)
+
+                for msg in history:
+                    if msg.get("content") and "<WIDGET:" in msg["content"]:
+                        # Match both /> and > endings
+                        msg["content"] = re.sub(
+                            r'<WIDGET:([A-Z_]+)\s+data="([^"]*)"(?:\s*/)?>', 
+                            match_replace,
+                            msg["content"]
+                        )
+            
+            except Exception as e:
+                logger.error(f"Error hydrating widgets: {e}")
+
         
         return {
             "messages": history,

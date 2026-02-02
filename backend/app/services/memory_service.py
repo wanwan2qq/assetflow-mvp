@@ -69,9 +69,14 @@ class MemoryService:
                 
                 # Initialize local BGE embeddings (BAAI/bge-large-zh-v1.5, 1024 dimensions)
                 # Use CPU to avoid complex GPU setup in Docker, it's fast enough for embeddings
+                model_kwargs = {'device': 'cpu'}
+                if offline_mode:
+                    model_kwargs['local_files_only'] = True
+                    logger.info("🔧 Forced local_files_only=True for SentenceTransformer")
+
                 self._embeddings = HuggingFaceEmbeddings(
                     model_name=settings.EMBEDDING_MODEL_NAME,
-                    model_kwargs={'device': 'cpu'},
+                    model_kwargs=model_kwargs,
                     encode_kwargs={'normalize_embeddings': True}
                 )
                 logger.info(f"✅ Embedding model loaded successfully: {settings.EMBEDDING_MODEL_NAME}")

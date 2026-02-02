@@ -61,9 +61,15 @@ class RAGEngine:
         Returns:
             RAGResponse 包含回答、来源和置信度
         """
-        # 1. 检索相关知识
+        # 1. 构造检索过滤器
+        filters = {}
+        if user_context and user_context.get("city"):
+            filters["city"] = user_context["city"]
+            
+        # 2. 检索相关知识
         knowledge = await self.retriever.search(
             query=question,
+            filters=filters,
             top_k=top_k
         )
         logger.info(f"RAG retrieved {len(knowledge)} knowledge chunks")

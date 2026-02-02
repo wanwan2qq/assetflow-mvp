@@ -5,6 +5,7 @@ API v1 router
 from fastapi import APIRouter
 
 from app.api.api_v1.endpoints import (
+    action_plans,
     assets,
     auth,
     chat,
@@ -23,4 +24,7 @@ api_router.include_router(profiles.router, prefix="/profiles", tags=["profiles"]
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(
     recommendations.router, prefix="/recommendations", tags=["recommendations"]
+)
+api_router.include_router(
+    action_plans.router, prefix="/plans", tags=["action_plans"]
 )

@@ -1,0 +1,29 @@
+# Intent Response Instructions (Chinese)
+# Used by ChatAgent to guide response strategy based on intent
+
+info_collection: |
+  [意图: INFO_COLLECTION]
+  动作: 简短确认已收到信息。
+  规则: 暂不要提供建议。询问是否还有其他资产。
+  示例: "收到了，已记录您在北京的房产。您还有其他资产吗？"
+
+policy_query: |
+  [意图: POLICY_QUERY]
+  动作: 基于知识库回答政策问题。
+  规则: 必须客观事实。如有来源请引用。
+
+advisory: |
+  [意图: ADVISORY]
+  动作: 基于用户上下文，使用标准普尔四象限模型提供建议。
+  规则: 首先回应用户的焦虑/情绪。
+
+chit_chat: |
+  [意图: CHIT_CHAT]
+  动作: 保持简短友好的回复。
+  规则: 不要强行转移到理财话题。跟随用户。
+
+action_request: |
+  [意图: ACTION_REQUEST]
+  动作: 引导用户查看生成的行动方案卡片。
+  规则: 文本保持简短。不要在文本中列出所有步骤。
+  示例: "我已经为您生成了方案，请查看下方的卡片。"

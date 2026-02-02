@@ -12,9 +12,10 @@ ActionReasoner Service for Phase 4
 
 import json
 import logging
-from typing import Any
-
-from sqlmodel import Session, select
+from typing import Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from sqlalchemy import select, func, desc, or_
 
 from app.core.database import get_db_session
 from app.core.config import get_settings
@@ -22,8 +23,7 @@ from app.core.prompt_manager import prompt_manager
 from app.models.action_plan import (
     ActionPlan, 
     ActionCategory, 
-    ActionPriority, 
-    ActionStep
+    ActionPriority
 )
 from app.models.user import User, UserAsset, UserProfile
 
@@ -44,37 +44,41 @@ class ActionReasoner:
     async def generate_plan(
         self,
         user_id: int,
-        focus_area: ActionCategory | None = None
-    ) -> list[ActionPlan]:
+        focus_area: ActionCategory | None = None,
+        check_existing: bool = True
+    ) -> tuple[list[ActionPlan], str]:
         """
         生成可执行方案
-        
-        流程:
-        1. 加载用户资产和画像
-        2. 分析资产配置问题 (PortfolioAnalyzer)
-        3. 检索相关知识 (RAGEngine)
-        4. 使用 LLM 推理生成方案
-        5. 存储并返回 ActionPlan
         
         Args:
             user_id: 用户ID
             focus_area: 可选的聚焦领域
+            check_existing: 是否检查现存计划 (智能路由)
             
         Returns:
-            生成的 ActionPlan 列表
+            (plans, status_code)
+            status_code: "generated", "existing_active", "existing_pending"
         """
         if not self.settings.ENABLE_ACTION_REASONER:
             logger.info("ActionReasoner disabled by feature flag")
-            return []
+            return [], "disabled"
         
         try:
-            logger.info(f"🎯 [ACTION_REASONER] Generating plan for user {user_id}, focus={focus_area}")
+            # Smart Routing: Check for existing plans
+            if check_existing and focus_area:
+                existing_plan = await self.get_active_plan_by_category(user_id, focus_area)
+                if existing_plan:
+                    status_code = "existing_pending" if existing_plan.status == "pending" else "existing_active"
+                    logger.info(f"👉 [ACTION_REASONER] Found existing plan {existing_plan.id} ({status_code})")
+                    return [existing_plan], status_code
+
+            logger.info(f"🎯 [ACTION_REASONER] Generating NEW plan for user {user_id}, focus={focus_area}")
             
             # Step 1: 加载用户上下文
             user_context = await self._load_user_context(user_id)
             if not user_context:
                 logger.warning(f"No context found for user {user_id}")
-                return []
+                return [], "no_context"
             
             # Step 2: 分析资产配置缺口
             gaps = await self.analyze_gaps(user_id)
@@ -86,25 +90,285 @@ class ActionReasoner:
             )
             
             # Step 4: 使用 LLM 生成方案
-            plan = await self._generate_plan_with_llm(
+            plan_data = await self._generate_plan_with_llm(
                 user_context,
                 gaps,
                 knowledge_context,
                 focus_area
             )
             
-            if plan:
+            if plan_data:
                 # Step 5: 存储方案
-                saved_plan = await self._save_plan(user_id, plan)
-                logger.info(f"✅ [ACTION_REASONER] Generated plan: {saved_plan.title}")
-                return [saved_plan] if saved_plan else []
+                saved_plan = await self._save_plan(user_id, plan_data, focus_area)
+                if saved_plan:
+                    logger.info(f"✅ [ACTION_REASONER] Generated plan: {saved_plan.title}")
+                    return [saved_plan], "generated"
             
-            return []
+            return [], "failed"
             
         except Exception as e:
             logger.error(f"❌ [ACTION_REASONER] Error generating plan: {e}")
-            return []
-    
+            return [], "error"
+
+    async def get_active_plan_by_category(
+        self,
+        user_id: int,
+        category: ActionCategory
+    ) -> ActionPlan | None:
+        """获取指定类别下的活跃计划 (pending 或 in_progress)"""
+        try:
+            async for session in get_db_session():
+                # 定义"活跃"状态
+                active_statuses = ["pending", "in_progress"]
+                
+                stmt = select(ActionPlan).where(
+                    ActionPlan.user_id == user_id,
+                    ActionPlan.category == category.value,
+                    ActionPlan.status.in_(active_statuses)
+                ).order_by(ActionPlan.created_at.desc())
+                
+                result = await session.execute(stmt)
+                plan = result.scalars().first()
+                
+                if plan:
+                    # 7-day rule: If pending plan is older than 7 days, ignore it (allow new generation)
+                    # In-progress plans always block/warn.
+                    from datetime import datetime, timedelta
+                    stale_days = getattr(self.settings, 'ACTION_PLAN_STALE_DAYS', 7)
+                    seven_days_ago = datetime.utcnow() - timedelta(days=stale_days)
+                    
+                    if plan.status == "pending" and plan.created_at < seven_days_ago:
+                        logger.info(f"Ignoring stale pending plan {plan.id} (created {plan.created_at})")
+                        return None
+                        
+                    return plan
+                    
+                return None
+        except Exception as e:
+            logger.error(f"Error getting active plan: {e}")
+            return None
+
+    async def adopt_plan(self, plan_id: int) -> ActionPlan | None:
+        """采纳计划：状态变更 -> 生成步骤记录"""
+        try:
+            from app.models.action_plan import ActionPlanStep
+            from datetime import datetime
+
+            async for session in get_db_session():
+                # 1. 获取计划
+                stmt = select(ActionPlan).where(ActionPlan.id == plan_id).options(selectinload(ActionPlan.steps_list))
+                result = await session.execute(stmt)
+                plan = result.scalar_one_or_none()
+                
+                if not plan:
+                    return None
+                
+                # 2. 更新状态
+                if plan.status == "pending":
+                    plan.status = "in_progress"
+                    plan.adopted_at = datetime.utcnow()
+                    
+                    # 3. 生成步骤记录
+                    # 从 original_steps_snapshot 解析并创建 ActionPlanStep
+                    steps_data = plan.original_steps_snapshot or []
+                    for idx, step in enumerate(steps_data):
+                        # 兼容不同格式的 step 数据
+                        step_action = step.get("action", step.get("title", f"步骤{idx+1}"))
+                        
+                        db_step = ActionPlanStep(
+                            plan_id=plan.id,
+                            step_number=step.get("step_number", idx + 1),
+                            action=step_action,
+                            description=step.get("description", ""),
+                            expected_outcome=step.get("expected_outcome", ""),
+                            timeline=step.get("timeline", ""),
+                            status="pending"
+                        )
+                        session.add(db_step)
+                    
+                    session.add(plan)
+                    await session.commit()
+                    await session.commit()
+                    
+                    # Re-fetch with eager loading to ensure steps_list is present for serialization after commit
+                    # (commit expires the instance, and we need steps_list loaded before session closes)
+                    stmt = select(ActionPlan).where(ActionPlan.id == plan_id).options(selectinload(ActionPlan.steps_list))
+                    result = await session.execute(stmt)
+                    plan = result.scalar_one()
+                    
+                    return plan
+                
+                return plan # Already adopted or other status
+                
+        except Exception as e:
+            logger.error(f"Error adopting plan: {e}")
+            return None
+
+    async def dismiss_plan(self, plan_id: int, reason: Optional[str] = None) -> bool:
+        """忽略/归档计划"""
+        try:
+            from app.models.action_plan import ActionPlan
+            # ActionStatus is imported at module level or inside if needed, assuming string literal is fine or import
+            
+            async for session in get_db_session():
+                stmt = select(ActionPlan).where(ActionPlan.id == plan_id)
+                result = await session.execute(stmt)
+                plan = result.scalar_one_or_none()
+                
+                if plan and plan.status == "pending":
+                    plan.status = "dismissed"
+                    plan.dismiss_reason = reason
+                    session.add(plan)
+                    await session.commit()
+                    return True
+                return False
+        except Exception as e:
+            logger.error(f"Error dismissing plan: {e}")
+            return False
+
+    async def update_step_status(
+        self,
+        step_id: int,
+        status: str,
+        notes: str | None = None
+    ) -> bool:
+        """更新步骤状态"""
+        try:
+            from app.models.action_plan import ActionPlanStep
+            from datetime import datetime
+            
+            async for session in get_db_session():
+                stmt = select(ActionPlanStep).where(ActionPlanStep.id == step_id)
+                result = await session.execute(stmt)
+                step = result.scalar_one_or_none()
+                
+                if step:
+                    step.status = status
+                    if status == "completed" and step.status != "completed":
+                        step.completed_at = datetime.utcnow()
+                    if notes:
+                        step.user_notes = notes
+                        
+                    session.add(step)
+                    await session.commit()
+                    
+                    # 检查是否所有步骤都已完成，若是则更新计划状态
+                    await self._check_plan_completion(session, step.plan_id)
+                    return True
+                return False
+        except Exception as e:
+            logger.error(f"Error updating step status: {e}")
+            return False
+
+    async def refine_plan(
+        self,
+        plan_id: int,
+        feedback: str
+    ) -> ActionPlan | None:
+        """根据用户反馈调整计划"""
+        try:
+            from datetime import datetime
+            async for session in get_db_session():
+                # 1. 获取原计划
+                stmt = select(ActionPlan).where(ActionPlan.id == plan_id)
+                result = await session.execute(stmt)
+                plan = result.scalar_one_or_none()
+                
+                if not plan or plan.status != "pending":
+                    logger.warning(f"Plan {plan_id} not found or not pending")
+                    return None
+                
+                # 2. 调用 LLM 调整
+                new_plan_data = await self._refine_plan_with_llm(plan, feedback)
+                
+                if new_plan_data:
+                    # 3. 更新现有计划
+                    plan.summary = new_plan_data.get("summary", plan.summary)
+                    plan.original_steps_snapshot = new_plan_data.get("steps", plan.original_steps_snapshot)
+                    plan.expected_benefits = new_plan_data.get("expected_benefits", plan.expected_benefits)
+                    plan.potential_risks = new_plan_data.get("potential_risks", plan.potential_risks)
+                    plan.updated_at = datetime.utcnow()
+                    
+                    session.add(plan)
+                    await session.commit()
+                    await session.refresh(plan)
+                    
+                    logger.info(f"✅ [ACTION_REASONER] Refined plan {plan_id}")
+                    return plan
+                    
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error refining plan: {e}")
+            return None
+
+    async def _refine_plan_with_llm(self, plan: ActionPlan, feedback: str) -> dict | None:
+        """调用 LLM 根据反馈修改计划 JSON"""
+        try:
+            from app.core.dependencies import get_llm_provider
+            llm_provider = get_llm_provider()
+            
+            current_json = {
+                "title": plan.title,
+                "summary": plan.summary,
+                "steps": plan.original_steps_snapshot,
+                "expected_benefits": plan.expected_benefits,
+                "potential_risks": plan.potential_risks
+            }
+            
+            prompt = f"""你是一位专业的财务顾问。用户希望调整以下行动方案。
+
+当前方案 (JSON):
+{json.dumps(current_json, ensure_ascii=False, indent=2)}
+
+用户反馈: "{feedback}"
+
+请根据反馈修改方案。保持 JSON 结构不变（title, summary, steps, expected_benefits, potential_risks）。
+仅返回修改后的 JSON。"""
+
+            messages = [{"role": "user", "content": prompt}]
+            
+            response = ""
+            async for chunk in llm_provider.generate_stream(messages, "您是一个JSON生成助手。"):
+                response += chunk
+                
+            # 解析 JSON
+            import re
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group())
+                
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error refining plan with LLM: {e}")
+            return None
+
+    async def _check_plan_completion(self, session, plan_id: int):
+        """检查计划是否完成"""
+        from app.models.action_plan import ActionPlanStep
+        from datetime import datetime
+        
+        # 统计未完成的步骤数
+        stmt = select(ActionPlanStep).where(
+            ActionPlanStep.plan_id == plan_id,
+            ActionPlanStep.status.not_in(["completed", "skipped"])
+        )
+        result = await session.execute(stmt)
+        incomplete_steps = result.scalars().all()
+        
+        if not incomplete_steps:
+            # 所有步骤已完成
+            plan_stmt = select(ActionPlan).where(ActionPlan.id == plan_id)
+            plan_result = await session.execute(plan_stmt)
+            plan = plan_result.scalar_one_or_none()
+            if plan and plan.status == "in_progress":
+                plan.status = "completed"
+                plan.completed_at = datetime.utcnow()
+                session.add(plan)
+                await session.commit()
+                logger.info(f"🎉 Plan {plan_id} completed!")
+
     async def analyze_gaps(self, user_id: int) -> dict:
         """
         分析用户资产配置缺口
@@ -388,20 +652,48 @@ class ActionReasoner:
             # 调用 LLM
             messages = [{"role": "user", "content": "请根据我的情况生成一个可执行的行动方案。"}]
             
+            logger.info("🤖 [ACTION_REASONER] Starting LLM stream generation...")
             response = ""
+            chunk_count = 0
             async for chunk in llm_provider.generate_stream(messages, system_prompt):
+                if chunk_count == 0:
+                    logger.info("🤖 [ACTION_REASONER] Received first chunk")
                 response += chunk
+                chunk_count += 1
+            logger.info(f"🤖 [ACTION_REASONER] LLM stream finished. Total chunks: {chunk_count}, Length: {len(response)}")
             
             # 解析 JSON
             try:
-                # 提取 JSON
+                # Remove markdown code blocks if present
+                clean_response = response
+                if "```json" in clean_response:
+                    clean_response = clean_response.split("```json")[1].split("```")[0]
+                elif "```" in clean_response:
+                    clean_response = clean_response.split("```")[0] # Simplistic fallback
+                
+                clean_response = clean_response.strip()
+                
+                # Robust JSON extraction using regex to find the outermost valid JSON object
                 import re
-                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                # Match the first '{' to the last '}'
+                # This is better than {.*} with DOTALL which is greedy and might fail if there is text after
+                # But for now, let's use a non-greedy approach or just clean content
+                
+                json_match = re.search(r'(\{[\s\S]*\})', clean_response)
+                
                 if json_match:
-                    plan_data = json.loads(json_match.group())
+                    json_str = json_match.group(1)
+                    # Try to parse
+                    plan_data = json.loads(json_str)
                     return plan_data
+                
+                # Fallback: try parsing the whole cleaned response
+                plan_data = json.loads(clean_response)
+                return plan_data
+                
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse LLM response as JSON: {e}")
+                # TODO: Implement repair logic or retry
             
             return None
             
@@ -453,20 +745,41 @@ class ActionReasoner:
         
         return ", ".join(parts) if parts else "暂无画像信息"
     
-    async def _save_plan(self, user_id: int, plan_data: dict) -> ActionPlan | None:
+    async def _save_plan(
+        self, 
+        user_id: int, 
+        plan_data: dict,
+        focus_area: ActionCategory | None = None
+    ) -> ActionPlan | None:
         """保存方案到数据库"""
         try:
             async for session in get_db_session():
+                # 处理 Category: 确保是有效的枚举值
+                category_val = plan_data.get("category")
+                
+                # Check validity
+                is_valid = any(category_val == item.value for item in ActionCategory)
+                
+                if not is_valid:
+                    # Fallback priority: 
+                    # 1. focus_area (the intent that triggered this)
+                    # 2. WEALTH_GROWTH (default)
+                    if focus_area:
+                        category_val = focus_area.value
+                    else:
+                        category_val = ActionCategory.WEALTH_GROWTH.value
+
                 plan = ActionPlan(
                     user_id=user_id,
                     title=plan_data.get("title", "行动计划"),
-                    category=plan_data.get("category", "asset_allocation"),
+                    category=category_val,
                     priority=plan_data.get("priority", "medium"),
                     summary=plan_data.get("summary", ""),
-                    steps=plan_data.get("steps", []),
+                    original_steps_snapshot=plan_data.get("steps", []),
                     expected_benefits=plan_data.get("expected_benefits", []),
                     potential_risks=plan_data.get("potential_risks", []),
-                    confidence=plan_data.get("confidence", 0.5)
+                    confidence=plan_data.get("confidence", 0.5),
+                    status="pending"
                 )
                 
                 session.add(plan)

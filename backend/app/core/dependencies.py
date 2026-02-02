@@ -27,6 +27,9 @@ def get_llm_provider():
     """
     from app.services.llm_caller import DeepSeekProvider, MockLLMProvider
     
+    import logging
+    logger = logging.getLogger(__name__)
+    
     # Check if we should use mock
     use_mock = settings.USE_MOCK_LLM
     
@@ -38,9 +41,13 @@ def get_llm_provider():
         and api_key != "mock-key"
     )
     
+    logger.info(f"LLM Provider Decision: USE_MOCK_LLM={use_mock}, has_valid_key={has_valid_key}")
+    
     if use_mock or not has_valid_key:
+        logger.warning("Returning MockLLMProvider")
         return MockLLMProvider()
     
+    logger.info("Returning DeepSeekProvider")
     return DeepSeekProvider(
         api_key=api_key,
         base_url=settings.OPENAI_API_BASE

@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     ENABLE_MEMORY_STORAGE: bool = True          # 启用长期记忆存储
     ENABLE_ENHANCED_EXTRACTION: bool = True     # 启用增强信息提取
     ACTION_PLAN_AUTO_GENERATE: bool = True      # 自动生成行动计划 (Phase 4 启用)
+    ACTION_PLAN_STALE_DAYS: int = 7             # 方案过期天数
     
     # Phase 4: RAG Integration
     ENABLE_RAG_AUGMENTATION: bool = True        # 启用 RAG 知识增强

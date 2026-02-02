@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 
-class ValuationCard extends StatelessWidget {
+class ValuationCard extends StatefulWidget {
   final String propertyName;
   final double estimatedValue;
   final String pricePerSqm;
-  final VoidCallback? onConfirm;
-  final VoidCallback? onEdit;
+  final Future<void> Function()? onConfirm;
+  final Future<void> Function()? onEdit;
+  final String status;
 
   const ValuationCard({
     super.key,
@@ -14,7 +15,53 @@ class ValuationCard extends StatelessWidget {
     required this.pricePerSqm,
     this.onConfirm,
     this.onEdit,
+    this.status = 'active',
   });
+
+  @override
+  State<ValuationCard> createState() => _ValuationCardState();
+}
+
+class _ValuationCardState extends State<ValuationCard> {
+  bool _isLoading = false;
+  late String _currentStatus;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentStatus = widget.status;
+  }
+
+  @override
+  void didUpdateWidget(ValuationCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.status != oldWidget.status) {
+      _currentStatus = widget.status;
+    }
+  }
+
+  Future<void> _handleAction(Future<void> Function()? action, {bool complete = false}) async {
+    if (action == null || _isLoading) return;
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      await action();
+      if (mounted && complete) {
+        setState(() {
+          _currentStatus = 'completed';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -39,7 +86,7 @@ class ValuationCard extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             Text(
-              propertyName,
+              widget.propertyName,
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 8),
@@ -56,7 +103,7 @@ class ValuationCard extends StatelessWidget {
                       ),
                     ),
                     Text(
-                      '¥${(estimatedValue / 10000).toStringAsFixed(0)}万',
+                      '¥${(widget.estimatedValue / 10000).toStringAsFixed(0)}万',
                       style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                         color: Colors.green,
                         fontWeight: FontWeight.bold,
@@ -74,7 +121,7 @@ class ValuationCard extends StatelessWidget {
                       ),
                     ),
                     Text(
-                      pricePerSqm,
+                      widget.pricePerSqm,
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
                   ],
@@ -82,24 +129,47 @@ class ValuationCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: onEdit,
-                    child: const Text('修改'),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      // Always allow modification, regardless of status
+                      onPressed: _isLoading ? null : () => _handleAction(widget.onEdit, complete: true),
+                      child: const Text('修改'),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: ElevatedButton(
-                    key: const Key('confirm_valuation_button'),
-                    onPressed: onConfirm,
-                    child: const Text('确认'),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _currentStatus == 'active'
+                        ? ElevatedButton(
+                            key: const Key('confirm_valuation_button'),
+                            onPressed: _isLoading ? null : () => _handleAction(widget.onConfirm, complete: true),
+                            child: _isLoading 
+                                ? const SizedBox(
+                                    width: 20, 
+                                    height: 20, 
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)
+                                  )
+                                : const Text('确认'),
+                          )
+                        : ElevatedButton(
+                            onPressed: null, // Disabled
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.grey[100],
+                              disabledBackgroundColor: Colors.grey[100],
+                              elevation: 0,
+                            ),
+                            child: Text(
+                              '已确认',
+                              style: TextStyle(
+                                color: Colors.grey[600],
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              ),
             const SizedBox(height: 8),
             Text(
               '* 估值基于市场数据的保守估算',
