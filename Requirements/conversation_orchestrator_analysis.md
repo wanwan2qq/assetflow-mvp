@@ -10,7 +10,8 @@
 `process_message` 方法是 `ConversationOrchestrator` 的心脏，它将一次用户交互拆解为清晰的 **7 个步骤**。以下是完整的数据流转链路：
 
 ### Step 1: Context Loading & Intent Analysis
-- **加载上下文**: 
+
+- **加载上下文**:
   - 调用 `ContextManager.get_context(user_id)` 获取 `ConversationContext` 对象。
   - 该对象包含：最近聊天记录、用户画像 (UserProfile)、资产列表 (UserAsset) 等。
   - **关键点**: 上下文加载是**异步**的，且支持多级缓存 (Memory/Redis/DB)，确保低延迟。
@@ -20,6 +21,7 @@
   - **作用**: 意图决定了后续是否触发 RAG 检索 (仅 `POLICY_QUERY` 触发) 以及使用何种 System Prompt。
 
 ### Step 2: Prompt Construction & LLM Interaction
+
 - **Prompt 构建**:
   - 基础 Prompt: 从 `agent_system.yaml` 加载。
   - **RAG 增强**: 如果意图匹配，调用 `_augment_with_rag` 检索知识库，并将知识片段注入 Prompt。
@@ -31,6 +33,7 @@
   - **工具绑定**: 将 `ShowValuationCard` 等 UI 工具绑定到 LLM 上下文中。
 
 ### Step 3: Tool/UI Handling
+
 - **工具捕获**:
   - 在流式生成过程中，编排器会监听 LLM 是否发出了 `tool_calls`。
   - 如果捕获到工具调用 (如 `ShowPortfolioChart`)，将暂存 `chunk`。
@@ -40,7 +43,8 @@
   - **注入方式**: 生成的 UI 组件以 `<WIDGET:TYPE data="..." />` 的形式追加到文本响应的末尾。
 
 ### Step 4: Background Tasks (Fire-and-Forget)
-- **触发机制**: 
+
+- **触发机制**:
   - 在响应生成的**最后一步** (返回给用户之后)，调用 `asyncio.create_task(self._background_extraction_pipeline(...))`。
   - **关键点**: 使用 `asyncio.create_task` 将任务提交到事件循环，**不等待**其完成，从而不阻塞用户的主交互流程。
 
@@ -77,6 +81,7 @@ def __init__(self, llm_provider: LLMProvider, context_manager: ContextManager):
 ```
 
 **作用**:
+
 - **可测试性**: 可以在单元测试中轻松注入 `MockLLMProvider` 或 `MockContextManager`。
 - **灵活性**: 切换底层实现 (如从 DeepSeek 切到 GPT-4) 无需修改编排器代码。
 
@@ -168,137 +173,185 @@ sequenceDiagram
 ### 5.1 核心入口 (Core Entry Points)
 
 #### `process_message`
+
 - **用途**: 处理用户消息的主入口。严格遵循 7 步流水线（见第1节）：协调上下文加载、意图识别、RAG 检索、Prompt 构建、LLM 流式调用、UI 组件注入以及触发后台任务。
 - **调用关系**:
-    - **Called By**: API 路由层 (如 `Process Chat Message` endpoint).
-    - **Calls**: 
-        - `ContextManager.get_context`
-        - `IntentClassifier.classify`
-        - `ChatHistoryService.save_user_message`
-        - `_augment_with_rag`
-        - `MemoryService.search_memories`
-        - `_generate_plan_if_requested`
-        - `_build_messages`
-        - `_get_system_prompt`
-        - `LLMProvider.generate_stream`
-        - `UIComponentInjector.generate_widgets_from_tool` / `extract_and_inject`
-        - `ChatHistoryService.save_ai_message`
-        - `_background_extraction_pipeline` (via `asyncio.create_task`)
+  - **Called By**: API 路由层 (如 `Process Chat Message` endpoint).
+  - **Calls**:
+    - `ContextManager.get_context`
+    - `IntentClassifier.classify`
+    - `ChatHistoryService.save_user_message`
+    - `_augment_with_rag`
+    - `MemoryService.search_memories`
+    - `_generate_plan_if_requested`
+    - `_build_messages`
+    - `_get_system_prompt`
+    - `LLMProvider.generate_stream`
+    - `UIComponentInjector.generate_widgets_from_tool` / `extract_and_inject`
+    - `ChatHistoryService.save_ai_message`
+
+    - `_background_extraction_pipeline` (via `asyncio.create_task`)
 
 #### `get_conversation_orchestrator`
+
 - **用途**: 获取或创建 `ConversationOrchestrator` 的单例实例。
 - **调用关系**:
-    - **Called By**: 依赖注入系统 (`app.core.dependencies`).
-    - **Calls**: `__init__`.
+  - **Called By**: 依赖注入系统 (`app.core.dependencies`).
+  - **Calls**: `__init__`.
 
 ### 5.2 提示词与上下文构建 (Prompt & Context Building)
 
 #### `_build_messages`
+
 - **用途**: 构建发送给 LLM 的消息列表。将系统信息（上下文摘要）、历史对话记录整合为标准消息格式。
 - **调用关系**:
-    - **Called By**: `process_message`.
-    - **Calls**: `_build_context_summary`, `ConversationContext.get_recent_messages`.
+  - **Called By**: `process_message`.
+  - **Calls**: `_build_context_summary`, `ConversationContext.get_recent_messages`.
 
 #### `_build_context_summary`
+
 - **用途**: 将复杂的用户上下文对象（画像、资产、房产）序列化为精炼的自然语言摘要，用于注入 Prompt 的首条 User Message 中，作为 Context Injection。
 - **调用关系**:
-    - **Called By**: `_build_messages`.
-    - **Calls**: 无 (纯数据处理).
+  - **Called By**: `_build_messages`.
+  - **Calls**: 无 (纯数据处理).
 
 #### `_get_system_prompt`
+
 - **用途**: 优先从 YAML 配置加载 System Prompt，失败时回退到默认 Prompt。
 - **调用关系**:
-    - **Called By**: `process_message`.
-    - **Calls**: `prompt_manager.render`, `_get_default_system_prompt`.
+  - **Called By**: `process_message`.
+  - **Calls**: `prompt_manager.render`, `_get_default_system_prompt`.
 
 #### `_get_default_system_prompt`
+
 - **用途**: 提供硬编码的默认 System Prompt，作为配置加载失败的兜底。
 - **调用关系**:
-    - **Called By**: `_get_system_prompt`.
+  - **Called By**: `_get_system_prompt`.
 
 ### 5.3 RAG 增强 (RAG Augmentation)
 
 #### `_should_use_rag`
+
 - **用途**: 启发式判断当前消息是否需要触发 RAG。基于关键词匹配（政策、房产、贷款等）和问题模式过滤，避免不必要的检索开销。
 - **调用关系**:
-    - **Called By**: `_augment_with_rag`.
-    - **Calls**: 无.
+  - **Called By**: `_augment_with_rag`.
+  - **Calls**: 无.
 
 #### `_augment_with_rag`
+
 - **用途**: 执行 RAG 检索流程。调用 RAG 引擎查询知识库，并返回增强后的 System Prompt 和来源列表。
 - **调用关系**:
-    - **Called By**: `process_message`.
-    - **Calls**: `_should_use_rag`, `RAGEngine.query`, `_build_rag_augmented_prompt`.
+  - **Called By**: `process_message`.
+  - **Calls**: `_should_use_rag`, `RAGEngine.query`, `_build_rag_augmented_prompt`.
 
 #### `_build_rag_augmented_prompt`
+
 - **用途**: 将检索到的 `KnowledgeChunk` 和 `RuleConstraint` 格式化并注入到 System Prompt 模板中。
 - **调用关系**:
-    - **Called By**: `_augment_with_rag`.
-    - **Calls**: `prompt_manager.render`.
+  - **Called By**: `_augment_with_rag`.
+  - **Calls**: `prompt_manager.render`.
 
 ### 5.4 计划与意图处理 (Planning & Intent)
 
 #### `_generate_plan_if_requested`
+
 - **用途**: 检测用户是否明确请求生成行动方案。如果是，则立即调用 ActionReasoner 生成方案，并返回引导性 Prompt 指令。这是为了实现“即问即答”的方案生成体验。
 - **调用关系**:
-    - **Called By**: `process_message`.
-    - **Calls**: `ActionReasoner.generate_plan`.
+  - **Called By**: `process_message`.
+  - **Calls**: `ActionReasoner.generate_plan`.
 
 ### 5.5 后台流水线 (Background Pipeline)
 
 #### `_background_extraction_pipeline`
+
 - **用途**: 异步执行的后台任务总线。负责在响应发送后处理耗时操作，如信息提取、画像分析、数据同步等。
 - **调用关系**:
-    - **Called By**: `process_message` (via `asyncio.create_task`).
-    - **Calls**: `_trigger_information_extraction`, `ContextManager.invalidate`, `_trigger_insight_analysis`, `_trigger_action_plan_generation`, `_trigger_real_estate_sync`, `_trigger_family_profile_update`.
+  - **Called By**: `process_message` (via `asyncio.create_task`).
+  - **Calls**: `_trigger_information_extraction`, `ContextManager.invalidate`, `_trigger_insight_analysis`, `_trigger_action_plan_generation`, `_trigger_real_estate_sync`, `_trigger_family_profile_update`.
 
 #### `_trigger_information_extraction`
+
 - **用途**: 调用 LLM (InformationExtractor) 从当次对话中提取用户资产和画像信息。
 - **调用关系**:
-    - **Called By**: `_background_extraction_pipeline`.
-    - **Calls**: `extract_information` (LLM Service), `AssetExtractionService.update_user_state`, `_store_to_long_term_memory`.
+  - **Called By**: `_background_extraction_pipeline`.
+  - **Calls**: `extract_information` (LLM Service), `AssetExtractionService.update_user_state`, `_store_to_long_term_memory`.
 
 #### `_trigger_insight_analysis`
+
 - **用途**: 定期触发 System 2 的深度心理与风险偏好分析。
 - **调用关系**:
-    - **Called By**: `_background_extraction_pipeline`.
-    - **Calls**: `InsightService.analyze_user_psychology`.
+  - **Called By**: `_background_extraction_pipeline`.
+  - **Calls**: `InsightService.analyze_user_psychology`.
 
 #### `_trigger_action_plan_generation`
+
 - **用途**:（后台自动触发模式）在信息收集足够时，尝试主动生成行动方案。
 - **调用关系**:
-    - **Called By**: `_background_extraction_pipeline`.
-    - **Calls**: `ActionReasoner.generate_plan`.
+  - **Called By**: `_background_extraction_pipeline`.
+  - **Calls**: `ActionReasoner.generate_plan`.
 
 ### 5.6 数据同步与持久化 (Sync & Persistence)
 
 #### `_store_to_long_term_memory`
+
 - **用途**: 将提取到的关键资产和画像变更存储到向量化长期记忆 (Vector Memory) 中。
 - **调用关系**:
-    - **Called By**: `_trigger_information_extraction`.
-    - **Calls**: `MemoryService.add_memory`.
+  - **Called By**: `_trigger_information_extraction`.
+  - **Calls**: `MemoryService.add_memory`.
 
 #### `_trigger_real_estate_sync`
+
 - **用途**: 将提取到的通用资产数据同步到精细化的 `RealEstateAsset` 表中，处理房产与贷款的关联。
 - **调用关系**:
-    - **Called By**: `_background_extraction_pipeline`.
-    - **Calls**: `_find_matching_property`, DB Operations.
+  - **Called By**: `_background_extraction_pipeline`.
+  - **Calls**: `_find_matching_property`.
 
 #### `_trigger_family_profile_update`
+
 - **用途**: 根据提取的画像信息更新家庭成员图谱 (FamilyProfile)。
 - **调用关系**:
-    - **Called By**: `_background_extraction_pipeline`.
-    - **Calls**: `FamilyProfileService.extract_family_info_from_profile`, `FamilyProfileService.create_or_update_profile`.
+  - **Called By**: `_background_extraction_pipeline`.
+  - **Calls**: `FamilyProfileService.extract_family_info_from_profile`, `FamilyProfileService.create_or_update_profile`.
 
 ### 5.7 工具方法 (Utilities)
 
 #### `_find_matching_property`
+
 - **用途**: 使用模糊匹配算法（地点、名称、面积）在现有房产列表中查找匹配项，用于数据同步去重。
 - **调用关系**:
-    - **Called By**: `_trigger_real_estate_sync`.
-    - **Calls**: `_is_name_similar`.
+  - **Called By**: `_trigger_real_estate_sync`.
+  - **Calls**: `_is_name_similar`.
 
 #### `_is_name_similar`
+
 - **用途**: 计算两个字符串的 Jaccard 相似度，用于模糊名称匹配。
 - **调用关系**:
-    - **Called By**: `_find_matching_property`.
+  - **Called By**: `_find_matching_property`.
+
+## 6. 优化建议 (Optimization Suggestions)
+
+基于当前架构分析，提出以下优化建议以进一步提升系统的健壮性和可维护性：
+
+### 6.1 并发控制 (Concurrency Control)
+
+当前使用 `asyncio.create_task` 触发后台任务，在高并发场景下可能会导致无限创建 Task，耗尽系统资源。
+
+- **建议**: 引入 `asyncio.Semaphore` 或使用 `TaskGroup` (Python 3.11+) 来限制并发执行的后台任务数量。或者引入消息队列 (如 Celery/RabbitMQ) 将后台任务完全解耦，确保主服务的稳定性。
+
+### 6.2 错误处理粒度 (Granular Error Handling)
+
+`process_message` 中的 `try-except` 覆盖范围过大。
+
+- **建议**: 对 RAG 检索、LLM 调用、UI 生成等关键步骤进行细粒度的错误捕获。例如，如果 RAG 检索失败，应仅降级为普通对话，而不是中断整个处理流程或返回通用错误信息。
+
+### 6.3 状态管理安全性 (State Safety)
+
+`ConversationContext` 对象在异步流程中被传递和修改。
+
+- **建议**: 考虑将 Context 设计为不可变对象 (Immutable)，每次更新返回新实例，或者在并发修改敏感区域加锁，避免潜在的竞态条件 (Race Conditions)。
+
+### 6.4 可观测性 (Observability)
+
+当前的日志记录较详细，但在分布式链路追踪方面有所欠缺。
+
+- **建议**: 引入 OpenTelemetry 或类似工具，为 `process_message` -> `LLM` -> `Background Task` 的全链路添加 Trace ID，便于跨组件追踪请求的处理延时和故障定位。

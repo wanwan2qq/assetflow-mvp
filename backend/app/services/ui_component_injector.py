@@ -17,6 +17,7 @@ from typing import Any
 from app.models.context import ConversationContext
 from app.services.ui_component_service import get_ui_component_service
 from app.models.action_plan import ActionCategory
+from app.models.intent import IntentType, IntentResult
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,218 @@ class UIComponentInjector:
     
     def __init__(self):
         self.ui_service = get_ui_component_service()
-    
+
+    async def orchestrate_ui_components(
+        self,
+        response: str,
+        context: ConversationContext,
+        user_id: int,
+        sync_result: dict[str, Any] | None = None,
+        intent: IntentResult | None = None
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """
+        Main entry point for UI orchestration.
+        Decides which components to show based on:
+        1. Data Triggers (sync_result): Explicit changes like new assets.
+        2. Intent Triggers (intent): User asked for something specifically.
+        3. Text Triggers (response pattern): Fallback based on keywords.
+        """
+        components = []
+        
+        # 0. Clean the response first (remove hallucinations)
+        cleaned_response = self._clean_hallucinated_tags(response)
+        
+        # Track what types we have added to avoid duplication
+        # Map: ComponentType -> list of IDs/Keys to differentiate
+        # For simplicity, we just track types for singleton widgets (Chart) and IDs for cards.
+        added_types = set()
+        added_entity_ids = set()
+
+        # 1. DATA TRIGGERS (Highest Priority)
+        # Check if synchronous pipeline extracted new critical data
+        if sync_result:
+            # Triggered Widgets explicitly requested by sync pipeline
+            triggered_names = sync_result.get("triggered_widgets", [])
+            new_assets = sync_result.get("new_assets", [])
+            
+            for asset in new_assets:
+                # 1. Real Estate -> Valuation Card (Priority)
+                if asset.asset_type == "real_estate":
+                    if f"VALUATION_{asset.id}" not in added_entity_ids:
+                        card = self.ui_service.generate_valuation_card(
+                            price=asset.value,
+                            area=asset.extra_data.get("area", 0) if asset.extra_data else 0,
+                            location=asset.extra_data.get("location", asset.name) if asset.extra_data else asset.name,
+                            confidence=0.8
+                        )
+                        if card:
+                            w_data = {
+                                "id": asset.id,
+                                "price": asset.value,
+                                "area": asset.extra_data.get("area", 0) if asset.extra_data else 0,
+                                "location": asset.extra_data.get("location", asset.name) if asset.extra_data else asset.name,
+                                "price_per_sqm": asset.value / asset.extra_data.get("area", 1) if asset.extra_data and asset.extra_data.get("area") else 0,
+                                "confidence": 0.8,
+                                "status": "active"
+                            }
+                            components.append({
+                                "type": "VALUATION_CARD",
+                                "data": w_data
+                            })
+                            added_entity_ids.add(f"VALUATION_{asset.id}")
+                            added_types.add("VALUATION_CARD")
+                            logger.info(f"🧩 [UI_TRIGGER:DATA] Added ValuationCard for new real_estate asset {asset.id}")
+                
+                # 2. Other Assets -> Asset Card
+                else:
+                    if f"ASSET_{asset.id}" not in added_entity_ids:
+                            card_data = {
+                            "id": asset.id,
+                            "name": asset.name,
+                            "value": asset.value,
+                            "type": asset.asset_type,
+                            "risk_level": "medium",
+                            "tags": [],
+                            "privacy_mode": False
+                            }
+                            components.append({
+                            "type": "ASSET_CARD",
+                            "data": card_data
+                            })
+                            added_entity_ids.add(f"ASSET_{asset.id}")
+                            added_types.add("ASSET_CARD")
+                            logger.info(f"🧩 [UI_TRIGGER:DATA] Added AssetCard for new asset {asset.id}")
+
+        # 2. INTENT TRIGGERS (Medium Priority)
+        if intent:
+            # Specific Intents force specific UI
+            if intent.intent_type == IntentType.ACTION_REQUEST:
+                # Check for Action Plan request
+                # TODO: Check 'focus_area' in extra params if available?
+                if "ACTION_PLAN_CARD" not in added_types:
+                    cards = await self._generate_action_plan_cards(context, user_id)
+                    if cards:
+                        components.extend(cards)
+                        added_types.add("ACTION_PLAN_CARD")
+                        logger.info(f"🧩 [UI_TRIGGER:INTENT] Added ActionPlanCard for intent {intent.intent_type}")
+            
+            # TODO: Add Dashboard intent trigger if we add that intent type
+            # For now, we rely on Text Trigger for Portfolio Chart usually, or specific intent.
+
+        # 3. TEXT TRIGGERS (Fallback)
+        # We reuse the legacy extract logic but filter out duplicates
+        # We assume extract_and_inject returns ALL matched components.
+        # We will manually run the detection logic here to have better control, 
+        # OR we call extract_and_inject logic without the injection part.
+        
+        # Let's extract the "Check Logic" from extract_and_inject into separate steps
+        
+        # 3.1 Valuation Cards (Text)
+        # Only if we didn't already add them via Data Trigger
+        # But wait, Text might refer to OLD assets, Data is for NEW assets.
+        # So we should run it, but check IDs.
+        try:
+            if self._should_show_valuation_card(cleaned_response, context):
+                text_val_cards = await self._generate_valuation_cards(context, user_id, cleaned_response)
+                for card in text_val_cards:
+                    asset_id = card["data"].get("id")
+                    if f"VALUATION_{asset_id}" not in added_entity_ids:
+                        components.append(card)
+                        added_entity_ids.add(f"VALUATION_{asset_id}")
+                        added_types.add("VALUATION_CARD")
+                        logger.info(f"🧩 [UI_TRIGGER:TEXT] Added ValuationCard for asset {asset_id} (Keywords match)")
+        except Exception as e:
+            logger.error(f"Error in text trigger (Valuation): {e}")
+
+        # 3.2 Action Plan (Text)
+        if "ACTION_PLAN_CARD" not in added_types:
+            try:
+                if self._should_show_action_plan_card(cleaned_response, context):
+                    text_plan_cards = await self._generate_action_plan_cards(context, user_id)
+                    components.extend(text_plan_cards)
+                    added_types.add("ACTION_PLAN_CARD")
+                    logger.info(f"🧩 [UI_TRIGGER:TEXT] Added ActionPlanCard (Keywords match)")
+            except Exception as e:
+                logger.error(f"Error in text trigger (Plan): {e}")
+
+        # 3.3 Portfolio Chart (Text)
+        if "PORTFOLIO_CHART" not in added_types:
+            try:
+                if self._should_show_portfolio_chart(cleaned_response, context):
+                    chart = await self._generate_portfolio_chart(context, user_id)
+                    if chart:
+                        components.append(chart)
+                        added_types.add("PORTFOLIO_CHART")
+                        logger.info(f"🧩 [UI_TRIGGER:TEXT] Added PortfolioChart (Keywords match)")
+            except Exception as e:
+                logger.error(f"Error in text trigger (Chart): {e}")
+
+        # 3.4 Simple Action Cards (Text)
+        # Priority: Low. Only if no Plan Card.
+        if "ACTION_PLAN_CARD" not in added_types and "ACTION_CARD" not in added_types:
+             try:
+                if self._should_show_action_cards(cleaned_response, context):
+                    action_cards = await self._generate_action_cards(context, user_id)
+                    components.extend(action_cards)
+                    added_types.add("ACTION_CARD")
+                    logger.info(f"🧩 [UI_TRIGGER:TEXT] Added ActionCard (Keywords match)")
+             except Exception as e:
+                logger.error(f"Error in text trigger (Actions): {e}")
+
+        # 3.5 Asset Cards (Text)
+        try:
+            if self._should_show_asset_card(cleaned_response, context):
+                asset_cards = await self._generate_asset_cards(context, user_id, cleaned_response)
+                for card in asset_cards:
+                    # Don't show generic asset card if we already showed Valuation Card for same asset
+                    asset_id = card["data"].get("id")
+                    if f"VALUATION_{asset_id}" not in added_entity_ids:
+                         components.append(card)
+                         logger.info(f"🧩 [UI_TRIGGER:TEXT] Added AssetCard for asset {asset_id} (Keywords match)")
+        except Exception as e:
+            logger.error(f"Error in text trigger (Asset): {e}")
+
+
+        # 4. INJECTION
+        enhanced_response = cleaned_response
+        if components:
+            import json
+            widgets_str = ""
+            for comp in components:
+                c_type = comp["type"]
+                c_data_json = json.dumps(comp["data"], ensure_ascii=False, default=str)
+                c_data_escaped = c_data_json.replace('"', '&quot;')
+                widgets_str += f'\n\n<WIDGET:{c_type} data="{c_data_escaped}" />'
+            
+            enhanced_response += widgets_str
+            
+        return enhanced_response, components
+
+    def _clean_hallucinated_tags(self, response: str) -> str:
+        """Helper to remove Hallucinated / Malformed tags."""
+        import re
+        # Copy-pasted regex logic from original extract_and_inject
+        # Remove any <WIDGET...> tags to prevent ID-less duplicates/hallucinations
+        
+        # 1. Match standard self-closing tags with DOTALL
+        response = re.sub(r'<WIDGET\b.*?/>', '', response, flags=re.DOTALL | re.IGNORECASE)
+        # 2. Match tag pairs
+        response = re.sub(r'<WIDGET\b.*?</WIDGET\s*>', '', response, flags=re.DOTALL | re.IGNORECASE)
+        # 3. HTML entity versions
+        response = re.sub(r'&lt;WIDGET\b.*?/&gt;', '', response, flags=re.DOTALL | re.IGNORECASE)
+        # 4. Non-self-closing with data
+        response = re.sub(r'<WIDGET:\w+\s+data="[^"]*">', '', response, flags=re.IGNORECASE)
+        # 5. Single quotes
+        response = re.sub(r"<WIDGET:\w+\s+data='[^']*'>", '', response, flags=re.IGNORECASE)
+        # 6. Self-closing variants
+        response = re.sub(r'<WIDGET:\w+\s+data="[^"]*"\s*/>', '', response, flags=re.IGNORECASE)
+        # 7. HTML entity quotes in data
+        response = re.sub(r'<WIDGET:\w+\s+data="\{[^}]*\}"\s*/>', '', response, flags=re.IGNORECASE)
+        # 8. Catch-all
+        response = re.sub(r'<WIDGET:\w+[^>]*/>', '', response, flags=re.IGNORECASE)
+        
+        return response
+
     async def extract_and_inject(
         self, 
         response: str, 
@@ -411,7 +623,9 @@ class UIComponentInjector:
     ) -> bool:
         """Determine if individual asset cards should be shown."""
         # Show when discussing specific assets updates or details
-        keywords = ["修改", "更新", "调整", "确认", "资产信息", "资产详情"]
+        # OPTIMIZED: Removed frequent keywords like "收到", "记录", "确认" to reduce annoyance.
+        # Only show when user specifically asks for details/modifications or AI implies modification.
+        keywords = ["修改", "更新", "调整", "资产详情"]
         return any(kw in response for kw in keywords)
 
     async def _generate_asset_cards(

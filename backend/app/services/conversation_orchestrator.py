@@ -235,8 +235,8 @@ class ConversationOrchestrator:
                 # 使用 RAG 增强后的 Prompt (包含知识片段)
                 system_prompt = rag_context
             else:
-                # 使用标准 Prompt
-                system_prompt = prompt_manager.render("chat", "agent_system", "system_instruction")
+                # 使用标准 Prompt (含 fallback 机制)
+                system_prompt = self._get_system_prompt(context)
 
             # 注入意图特定指令 (Intent-Specific Instructions)
             # 确保 Agent 在不同场景下 (如闲聊 vs 严谨咨询) 表现出正确的人设
@@ -297,7 +297,7 @@ class ConversationOrchestrator:
             tool_calls = []
             
             # 执行 LLM 流式生成
-            async for chunk in self.llm_provider.generate_stream(messages, system_prompt, tools=ui_tools):
+            async for chunk in self.llm_provider.generate_stream(messages, system_prompt, tools=None):
                 if isinstance(chunk, str):
                     # 文本流: 立即 Yield 给前端，实现打字机效果 (System 1 极速响应)
                     full_response += chunk
@@ -313,99 +313,28 @@ class ConversationOrchestrator:
             self.context_manager.update_in_memory(user_id, context)
             
             # =========================================================================
-            # Phase 4: UI 组件注入 (UI Component Injection)
+            # Phase 4: UI 组件编排 (Deterministic UI Orchestration)
             # =========================================================================
             
-            # Step 6: 生成并注入 UI 组件
-            enhanced_response = full_response
-            ui_components = []
+            # Step 6: 智能 UI 编排 (The Three Triggers)
+            # 替代旧的 Tool Call 和正则匹配，使用确定性逻辑决定显示什么组件
+            enhanced_response, orchestrated_components = await self.ui_injector.orchestrate_ui_components(
+                full_response,
+                context,
+                user_id,
+                sync_result=sync_result,
+                intent=intent_result
+            )
             
-            # A. 优先处理 LLM 的显式工具调用 (Explicit Tool Calls)
-            if tool_calls:
-                for tool_call in tool_calls:
-                     widgets = await self.ui_injector.generate_widgets_from_tool(
-                         tool_call, context, user_id
-                     )
-                     ui_components.extend(widgets)
+            # 如果产生了新的组件或修改了响应
+            if orchestrated_components:
+                # 计算新增的部分 (enhanced_response 包含了原来的 full_response + widgets)
+                # 简单处理：只 yield 差异部分
+                new_part = enhanced_response[len(full_response):]
+                if new_part:
+                    yield new_part
                 
-                # 将生成的组件追加到响应末尾
-                if ui_components:
-                    import json
-                    widgets_str = ""
-                    for comp in ui_components:
-                        c_type = comp["type"]
-                        c_data_json = json.dumps(comp["data"], ensure_ascii=False, default=str)
-                        c_data_escaped = c_data_json.replace('"', '&quot;')
-                        widgets_str += f'\n\n<WIDGET:{c_type} data="{c_data_escaped}" />'
-                    
-                    enhanced_response = full_response + widgets_str
-                    # 再次 Yield 组件部分
-                    yield widgets_str
-                else:
-                    # 容错处理: LLM 调用了工具但某些原因未生成组件 (可能是数据不足)
-                    # 如果文本也是空的，这是一个严重的 "空响应" bug，需要给出兜底回复
-                    if not full_response.strip():
-                        # Determine specific fallback based on what tool was attempted
-                        failed_tools = [t.get("name") for t in tool_calls]
-                        
-                        if "ShowPortfolioChart" in failed_tools:
-                            fallback_text = "为了给您更准确的资产配置建议，我需要您至少提供两类资产信息（例如房产+存款）。请继续补充信息哦！💡"
-                        elif "ShowValuationCard" in failed_tools:
-                            fallback_text = "收到，已记录您的房产信息。正在后台同步最新市场数据，请稍等片刻后再查看估值卡片 🏠"
-                        elif "ShowActionPlan" in failed_tools:
-                            fallback_text = "已收到您的请求。目前信息尚不足以生成完整的行动方案，建议您先补充一下家庭财务状况。"
-                        else:
-                            # Default fallback
-                            fallback_text = "已收到您的信息。正在结合现有资产进行综合分析，请稍候..."
-                            
-                        logger.warning(f"⚠️ LLM called tools {failed_tools} but no widgets generated. Injecting smart fallback: {fallback_text}")
-                        enhanced_response = fallback_text
-                        yield fallback_text
-                    else:
-                        enhanced_response = full_response
-            
-            # B. 降级策略: 如果没有 Tool Call，尝试正则匹配 (Legacy/Supplemental)
-            # B. 降级策略: 如果没有 Tool Call，尝试正则匹配 (Legacy/Supplemental)
-            # [DISABLED] 暂时禁用正则匹配注入，确保纯文本输出
-            else:
-                pass
-                # enhanced_response, legacy_components = await self.ui_injector.extract_and_inject(
-                #     full_response, context, user_id
-                # )
-                # if enhanced_response != full_response:
-                #     # Yield 追加的部分
-                #     yield enhanced_response[len(full_response):]
-                #     ui_components = legacy_components
-
-            # [Plan B] Deterministic UI Injection
-            # 如果同步提取阶段明确要求显示某些组件 (如 估值卡片)，直接追加
-            if sync_result.get("triggered_widgets"):
-                logger.info(f"🧩 [SYNC_UI] Injecting deterministic widgets: {sync_result['triggered_widgets']}")
-                widget_str_buffer = ""
-                
-                for w_name in sync_result['triggered_widgets']:
-                    if w_name == "ShowValuationCard":
-                        # Find the newly added real estate asset(s)
-                        for new_asset in sync_result.get("new_assets", []):
-                            if new_asset.asset_type == "real_estate":
-                                # Generate widget markup
-                                # For simplicity, construct raw data manually or use UIInjector helper if possible
-                                # Assuming simplified construction for MVP
-                                # Need to format data as assumed by frontend: { "asset_id": ... }
-                                
-                                w_data = {"asset_id": new_asset.id}
-                                import json
-                                c_data_json = json.dumps(w_data, ensure_ascii=False)
-                                c_data_escaped = c_data_json.replace('"', '&quot;')
-                                widget_xml = f'\n\n<WIDGET:VALUATION_CARD data="{c_data_escaped}" />'
-                                
-                                widget_str_buffer += widget_xml
-                                ui_components.append({"type": "VALUATION_CARD", "data": w_data})
-                
-                if widget_str_buffer:
-                    full_response += widget_str_buffer
-                    enhanced_response = full_response # Update final
-                    yield widget_str_buffer # Stream to user
+                logger.info(f"🧩 [UI_ORCHESTRATOR] Injected {len(orchestrated_components)} widgets: {[c['type'] for c in orchestrated_components]}")
 
             
             # Step 7: 保存最终的 AI 消息 (含组件标记)
@@ -521,53 +450,7 @@ class ConversationOrchestrator:
             logger.error(traceback.format_exc())
             return result
 
-    async def _save_and_value_assets(self, user_id: int, extracted_data: list[Any], chat_message_id: int) -> dict:
-        """辅助方法: 存库并触发估值"""
-        res = {"new_assets": [], "updated_valuations": [], "triggered_widgets": []}
-        
-        from app.services.asset_service import AssetService
-        asset_service = AssetService() # Should be injected, but for now instantiate
-        
-        for item in extracted_data:
-            # 1. 保存到 UserAsset
-            # 模拟 Entity -> Model 的转换逻辑
-            # 这里简化处理，假设 item 已经是结构化数据
-            try:
-                # 识别资产类型
-                asset_type = item.type # e.g. "real_estate"
-                
-                # Check duplication / Update logic? 
-                # For Plan B, we assume "add or update"
-                # Using a simplified upsert logic for now
-                
-                saved_asset = await asset_service.create_or_update_asset(
-                    user_id=user_id,
-                    asset_data=item, 
-                    source_message_id=chat_message_id
-                )
-                
-                if saved_asset:
-                    res["new_assets"].append(saved_asset)
-                    
-                    # 2. 如果是房产，立即触发估值
-                    if saved_asset.asset_type == "real_estate":
-                        logger.info(f"🏠 [SYNC_VALUATION] Triggering valuation for asset {saved_asset.id}")
-                        from app.services.valuation_service import ValuationService
-                        val_service = ValuationService()
-                        valuation = await val_service.assess_asset_value(saved_asset.id)
-                        
-                        if valuation:
-                            # 更新资产价值
-                            await asset_service.update_asset_value(saved_asset.id, valuation.total_value)
-                            saved_asset.value = valuation.total_value # Update local object
-                            res["updated_valuations"].append(valuation.total_value)
-                            res["triggered_widgets"].append("ShowValuationCard")
-                            
-            except Exception as e:
-                logger.error(f"Error saving asset item: {e}")
-                continue
-                
-        return res
+
 
     async def _generate_plan_if_requested(
         self,
