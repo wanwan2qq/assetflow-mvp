@@ -38,6 +38,7 @@ class ExtractedAsset(BaseModel):
     location: str | None = None
     area: float | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    cash_flows: list[dict[str, Any]] = Field(default_factory=list)
     confidence: float = 0.0
     extracted_from: str
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
@@ -430,6 +431,9 @@ class InformationExtractor:
                 if area:
                     metadata["area"] = area
 
+                # Extract cash flows if present
+                cash_flows = asset_data.get("cash_flows", [])
+
                 asset = ExtractedAsset(
                     asset_type=asset_type,
                     name=name,
@@ -437,9 +441,14 @@ class InformationExtractor:
                     location=location,
                     area=area,
                     metadata=metadata,
+                    cash_flows=cash_flows,
                     confidence=0.85,  # High confidence from LLM extraction
                     extracted_from=extracted_from,
                 )
+                
+                # Apply Smart Defaults
+                self._apply_smart_defaults(asset)
+                
                 assets.append(asset)
 
             except Exception as e:
@@ -466,6 +475,37 @@ class InformationExtractor:
                     return quadrant_name
         
         return None
+
+    def _apply_smart_defaults(self, asset: ExtractedAsset) -> None:
+        """Apply smart defaults to extracted asset based on rules"""
+        
+        # Rule 1: Liability defaults
+        if asset.asset_type == AssetType.LIABILITY:
+            # Default interest rate if missing
+            if "interest_rate" not in asset.metadata:
+                asset.metadata["interest_rate"] = 4.2
+                asset.metadata["interest_rate_source"] = "smart_defaults"
+                asset.metadata["term_years"] = asset.metadata.get("term_years", 30)
+        
+        # Rule 2: Cash Salary defaults
+        if asset.asset_type == AssetType.CASH:
+            # Check for salary keywords in name
+            name_lower = asset.name.lower()
+            if "工资" in name_lower or "salary" in name_lower:
+                # If it looks like income but has no explicit cash flow, create one
+                if not asset.cash_flows and asset.value:
+                    asset.cash_flows.append({
+                        "flow_type": "income",
+                        "frequency": "monthly",
+                        "amount": asset.value,
+                        "name": f"{asset.name} Income"
+                    })
+        
+        # Rule 3: Real Estate Valuation flag
+        if asset.asset_type == AssetType.REAL_ESTATE:
+            # If value is missing or placeholder (<= 1.0)
+            if not asset.value or asset.value <= 1.0:
+                 asset.metadata["needs_valuation"] = True
 
     def _parse_profile(
         self, profile_data: dict, extracted_from: str

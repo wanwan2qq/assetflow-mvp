@@ -4,7 +4,7 @@ import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../features/auth/presentation/pages/login_page.dart';
 import '../../features/chat/presentation/pages/chat_page.dart';
-import '../../features/dashboard/presentation/pages/dashboard_page.dart';
+import '../../features/dashboard/presentation/pages/wealth_page.dart';
 import '../../features/profile/presentation/pages/profile_page.dart';
 import '../../features/actions/presentation/pages/action_plans_page.dart';
 import '../navigation/app_navigation.dart';
@@ -29,15 +29,11 @@ GoRouter appRouter(AppRouterRef ref) {
             name: AppRoutes.chatName,
             builder: (context, state) => const ChatPage(),
           ),
-          GoRoute(
-            path: AppRoutes.actions,
-            name: AppRoutes.actionsName,
-            builder: (context, state) => const ActionPlansPage(),
-          ),
+          // Actions route removed
           GoRoute(
             path: AppRoutes.dashboard,
             name: AppRoutes.dashboardName,
-            builder: (context, state) => const DashboardPage(),
+            builder: (context, state) => const WealthPage(),
           ),
           GoRoute(
             path: AppRoutes.profile,

@@ -13,6 +13,7 @@ from .user import AssetType, RiskLevel, User, UserAsset, UserProfile
 # Phase 4 models
 from .action_plan import ActionPlan, ActionCategory, ActionPriority, ActionPlanStep, ActionStatus
 from .family import FamilyProfile, FamilyMember, LifecycleEvent, FamilyRelation, LifecycleEventType
+from .wealth import CashFlowItem, AssetValuationHistory, WealthHistory, FlowType, Frequency
 
 __all__ = [
     # User models
@@ -58,5 +59,12 @@ __all__ = [
     "LifecycleEvent",
     "FamilyRelation",
     "LifecycleEventType",
+    
+    # Wealth Management models
+    "CashFlowItem",
+    "AssetValuationHistory",
+    "WealthHistory",
+    "FlowType",
+    "Frequency",
 ]
 

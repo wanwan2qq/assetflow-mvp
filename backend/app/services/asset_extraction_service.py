@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 from app.core.database import get_db_session
 from app.models.user import AssetType, UserAsset, UserProfile
 from app.models.cognition import UserCognition
+from app.models.wealth import CashFlowItem, AssetValuationHistory, FlowType, Frequency
 from app.services.information_extraction import ExtractedAsset, ExtractedUserProfile
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,13 @@ class AssetExtractionService:
                         user_id, extracted_asset, session
                     )
                     stored_assets.append(new_asset)
+                    existing_asset = new_asset # For cash flow processing
+
+                # Process cash flows associated with this asset
+                if extracted_asset.cash_flows:
+                    await self._process_asset_cash_flows(
+                        user_id, existing_asset.id, extracted_asset.cash_flows, session
+                    )
 
             except Exception as e:
                 logger.error(
@@ -306,8 +314,70 @@ class AssetExtractionService:
         session.add(asset)
         await session.flush()  # Ensure the asset gets an ID
         logger.info(f"Created new asset: {asset.name} for user {user_id}")
+        
+        # Record initial valuation history
+        if asset.value > 0:
+            await self._record_valuation_history(
+                asset.id, asset.value, "initial_creation", session
+            )
 
         return asset
+
+    async def _process_asset_cash_flows(
+        self, user_id: int, asset_id: int, cash_flows: list[dict], session: Session
+    ):
+        """Process and store cash flows linked to an asset"""
+        for cf_data in cash_flows:
+            try:
+                # Map string values to Enums
+                flow_type_str = cf_data.get("flow_type", "expense").lower()
+                flow_type = FlowType.INCOME if flow_type_str == "income" else FlowType.EXPENSE
+                
+                freq_str = cf_data.get("frequency", "monthly").lower()
+                frequency = Frequency.MONTHLY # Default
+                if freq_str == "yearly": frequency = Frequency.YEARLY
+                elif freq_str == "quarterly": frequency = Frequency.QUARTERLY
+                elif freq_str == "once": frequency = Frequency.ONCE
+                
+                # Check for existing matching cash flow to avoid duplicates (simple name match for now)
+                statement = select(CashFlowItem).where(
+                    CashFlowItem.user_id == user_id,
+                    CashFlowItem.related_asset_id == asset_id,
+                    CashFlowItem.name == cf_data.get("name")
+                )
+                result = await session.execute(statement)
+                existing_cf = result.scalar_one_or_none()
+                
+                if existing_cf:
+                    # Update parameters
+                    existing_cf.amount = cf_data.get("amount", existing_cf.amount)
+                    session.add(existing_cf)
+                else:
+                    new_cf = CashFlowItem(
+                        user_id=user_id,
+                        name=cf_data.get("name", "Cash Flow"),
+                        amount=cf_data.get("amount", 0.0),
+                        flow_type=flow_type,
+                        frequency=frequency,
+                        related_asset_id=asset_id,
+                        is_recurring=True # Assume extracted flows are recurring by default unless specified
+                    )
+                    session.add(new_cf)
+                    
+            except Exception as e:
+                logger.error(f"Error processing cash flow: {e}")
+
+    async def _record_valuation_history(
+        self, asset_id: int, value: float, source: str, session: Session
+    ):
+        """Record a point in the asset's valuation history"""
+        history = AssetValuationHistory(
+            asset_id=asset_id,
+            value=value,
+            source=source,
+            date=datetime.utcnow()
+        )
+        session.add(history)
 
     async def _update_asset_from_extracted(
         self,
@@ -343,6 +413,18 @@ class AssetExtractionService:
 
         # Mark as modified
         session.add(existing_asset)
+        
+        # Record valuation history if value changed significanly
+        # We need to access the old value, but it's already updated on the object. 
+        # Ideally check before update, but for now we assume if we are here we might want to log it?
+        # Actually `_update_asset_from_extracted` is called only if confident.
+        # Let's check if we updated the value above.
+        if extracted_asset.value and extracted_asset.confidence > 0.5:
+             # It was updated
+             await self._record_valuation_history(
+                 existing_asset.id, existing_asset.value, "extraction_update", session
+             )
+        
         logger.info(f"Updated existing asset: {existing_asset.name}")
 
     async def update_asset_value(

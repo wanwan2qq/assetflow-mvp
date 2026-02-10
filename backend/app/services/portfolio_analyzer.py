@@ -7,6 +7,8 @@ from enum import Enum
 from typing import Any
 
 from app.models.user import AssetType, UserAsset, UserProfile
+from app.models.wealth import WealthHistory, CashFlowItem, FlowType, Frequency
+from app.core.database import get_db_session
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +144,63 @@ class PortfolioAnalyzer:
             "include_self_occupied_property": True,  # 自住房是否计入锚点
             "anchor_ratio_warning": 0.7,  # 锚点资产占比警告阈值
             "enable_leverage_suggestion": True,  # 是否启用抵押建议
+        }
+
+    async def get_net_worth_trend(
+        self, user_id: int, session: Any, limit: int = 12
+    ) -> list[WealthHistory]:
+        """Get historical net worth data"""
+        from sqlmodel import select, col
+        # Use session to query WealthHistory
+        # Note: Session type hint is Any to avoid circular imports if needed, or stick to Session from sqlmodel
+        statement = (
+            select(WealthHistory)
+            .where(WealthHistory.user_id == user_id)
+            .order_by(col(WealthHistory.date).desc())
+            .limit(limit)
+        )
+        result = await session.execute(statement)
+        history = result.scalars().all()
+        return list(reversed(history)) # Return chronological order
+
+    async def calculate_projected_cashflow(
+        self, user_id: int, session: Any
+    ) -> dict[str, float]:
+        """
+        Calculate projected annual cash flow based on CashFlowItems.
+        Returns dict with total_income, total_expense, net_cashflow.
+        """
+        from sqlmodel import select
+        
+        statement = select(CashFlowItem).where(CashFlowItem.user_id == user_id)
+        result = await session.execute(statement)
+        items = result.scalars().all()
+        
+        total_income = 0.0
+        total_expense = 0.0
+        
+        for item in items:
+            annual_amount = 0.0
+            if item.frequency == Frequency.MONTHLY:
+                annual_amount = item.amount * 12
+            elif item.frequency == Frequency.QUARTERLY:
+                annual_amount = item.amount * 4
+            elif item.frequency == Frequency.YEARLY:
+                annual_amount = item.amount
+            elif item.frequency == Frequency.ONCE:
+                # For projection, we might ignore ONCE or treat as current year only.
+                # Let's include it for now as immediate cash flow impact
+                annual_amount = item.amount
+            
+            if item.flow_type == FlowType.INCOME:
+                total_income += annual_amount
+            else:
+                total_expense += annual_amount
+                
+        return {
+            "total_income": total_income,
+            "total_expense": total_expense,
+            "net_cashflow": total_income - total_expense
         }
 
     def analyze_portfolio(

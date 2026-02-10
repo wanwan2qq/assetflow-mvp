@@ -19,20 +19,19 @@ class AppNavigation extends StatelessWidget {
         type: BottomNavigationBarType.fixed,
         items: const [
           BottomNavigationBarItem(
-            icon: Icon(Icons.chat),
-            label: '聊天',
+            icon: Icon(Icons.chat_bubble_outline),
+            activeIcon: Icon(Icons.chat_bubble),
+            label: 'inW',
           ),
           BottomNavigationBarItem(
-            icon: Icon(Icons.assignment),
-            label: '行动',
+            icon: Icon(Icons.account_balance_wallet_outlined),
+            activeIcon: Icon(Icons.account_balance_wallet),
+            label: '财富',
           ),
           BottomNavigationBarItem(
-            icon: Icon(Icons.dashboard),
-            label: '仪表板',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.person),
-            label: '个人',
+            icon: Icon(Icons.person_outline),
+            activeIcon: Icon(Icons.person),
+            label: '我的',
           ),
         ],
       ),
@@ -44,14 +43,11 @@ class AppNavigation extends StatelessWidget {
     if (location.startsWith('/chat')) {
       return 0;
     }
-    if (location.startsWith('/actions')) {
+    if (location.startsWith('/dashboard')) {
       return 1;
     }
-    if (location.startsWith('/dashboard')) {
-      return 2;
-    }
     if (location.startsWith('/profile')) {
-      return 3;
+      return 2;
     }
     return 0;
   }
@@ -62,12 +58,9 @@ class AppNavigation extends StatelessWidget {
         GoRouter.of(context).go('/chat');
         break;
       case 1:
-        GoRouter.of(context).go('/actions');
-        break;
-      case 2:
         GoRouter.of(context).go('/dashboard');
         break;
-      case 3:
+      case 2:
         GoRouter.of(context).go('/profile');
         break;
     }

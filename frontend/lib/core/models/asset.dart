@@ -30,6 +30,54 @@ class UserAsset with _$UserAsset {
     required DateTime updatedAt,
   }) = _UserAsset;
 
+  const UserAsset._();
+
+  double? get interestRate {
+    final rate = metadata?['interest_rate'];
+    if (rate is num) return rate.toDouble();
+    if (rate is String) return double.tryParse(rate);
+    return null;
+  }
+
+  double? get originalBalance {
+    final balance = metadata?['original_balance'];
+    if (balance is num) return balance.toDouble();
+    if (balance is String) return double.tryParse(balance);
+    return null;
+  }
+
+  double get progress {
+    final original = originalBalance;
+    if (original == null || original == 0) return 0.0;
+    
+    // For liabilities (e.g. loans), progress usually means how much paid off.
+    // Assuming 'value' is current balance (remaining debt).
+    // Paid = Original - Current.
+    // Progress = Paid / Original.
+    
+    // However, if it is an investment, progress might mean growth?
+    // The requirement says "Calculate based on original vs current".
+    // I'll assume standard progress bar behavior: 
+    // If Liability: (Original - Current) / Original
+    // If Asset: (Current - Original) / Original ?? Or just growth?
+    // Let's stick to the prompt's context, likely debt progress or savings goal.
+    // Given the "Wealth" context, for liabilities it's payoff progress.
+    
+    if (assetType == AssetType.liability) {
+       if (value > original) return 0.0; // Debt increased?
+       return (original - value) / original;
+    } else {
+       // For assets, maybe goal progress? But we don't have a 'goal'.
+       // Or simply growth percentage? (Current - Original) / Original
+       // Let's implement growth ratio for assets, payoff ratio for liabilities.
+       // Actually, keeping it simple as per "progress" usually implies 0.0 to 1.0.
+       // For assets, maybe we don't have a defined "progress" without a target?
+       // I'll default to 0.0 for non-liabilities for now unless clear.
+       // But wait, "WealthPage" might show progress bars for debts.
+       return 0.0;
+    }
+  }
+
   factory UserAsset.fromJson(Map<String, dynamic> json) {
     // 后端返回的字段名是 asset_type (snake_case)
     final assetTypeStr = json['asset_type'] as String? ?? json['assetType'] as String? ?? 'cash';

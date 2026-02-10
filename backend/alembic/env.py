@@ -16,6 +16,7 @@ from app.models.commercial import CommercialProduct  # noqa: F401
 from app.models.knowledge import FAQKnowledge, PolicyKnowledge, ProductKnowledge  # noqa: F401
 from app.models.real_estate import RealEstateAsset  # noqa: F401
 from app.models.user import User, UserAsset, UserProfile  # noqa: F401
+from app.models.wealth import CashFlowItem, AssetValuationHistory, WealthHistory  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
